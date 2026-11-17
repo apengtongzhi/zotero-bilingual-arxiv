@@ -9,7 +9,7 @@
 //   nsIFile       -> Zotero.File.pathToFile() / IOUtils / PathUtils
 //   nsIProcess    -> resource://gre/modules/Subprocess.sys.mjs
 //   nsIFilePicker -> chrome://zotero/content/modules/filePicker.mjs
-//   Services.dirsvc -> PathUtils.homeDir
+//   Services.dirsvc("Home") -> resolveHomeDir()（PathUtils.homeDir 并非各版本都有，见下）
 var MB_PICK_OPEN = 0;      // FilePicker#modeOpen
 var MB_PICK_FOLDER = 2;    // FilePicker#modeGetFolder
 
@@ -88,6 +88,45 @@ async function fetchText(url) {
     Zotero.logError(e);
   }
   return String(await Zotero.File.getContentsFromURLAsync(url));
+}
+
+// 用户主目录。PathUtils.profileDir 各版本都有，但 homeDir 不一定——取不到时
+// 会抛异常，被上层 catch 吞成「找不到用户主目录」这种看似莫名的提示。
+// 逐级回退，并且把结果缓存下来（配置文件路径每次读写都要用）。
+var _homeDirCache = null;
+function resolveHomeDir() {
+  if (_homeDirCache !== null) return _homeDirCache;
+  var found = "";
+  // 1) PathUtils.homeDir（新版 Gecko 才有）
+  try {
+    var h = PathUtils.homeDir;
+    if (typeof h === "string" && h) found = h;
+  } catch (e) {}
+  // 2) Services.dirsvc 的 "Home"。沙箱里没有 Ci，只能从活窗口借 nsIFile 常量
+  if (!found) {
+    try {
+      var wins = (Zotero.getMainWindows ? Zotero.getMainWindows() : []) || [];
+      var win = wins[0] || (Zotero.getMainWindow ? Zotero.getMainWindow() : null);
+      var Ci = win && win.Components && win.Components.interfaces;
+      if (Ci && Ci.nsIFile) {
+        var f = Services.dirsvc.get("Home", Ci.nsIFile);
+        if (f && f.path) found = f.path;
+      }
+    } catch (e) {}
+  }
+  // 3) 再退一步：从 profileDir 往上找家目录（…/Library/Application Support/Zotero/Profiles/x.default）
+  if (!found) {
+    try {
+      var p = String(PathUtils.profileDir || "");
+      var m = p.match(/^(.*?)\/Library\/Application Support\/Zotero\/Profiles\//);
+      if (m && m[1]) found = m[1];
+    } catch (e) {}
+  }
+  if (found) {
+    try { Zotero.debug("[Mktero Bilingual] homeDir = " + found); } catch (e) {}
+  }
+  _homeDirCache = found;
+  return found;
 }
 
 // 插件打包成 .xpi 后 rootURI 是 jar:file:///…!/，里面的 .py 不能直接执行，
@@ -273,10 +312,13 @@ Zotero.MkteroBilingual = {
     return el.type === "checkbox" ? el.checked : el.value;
   },
 
-  _status: function (text, ok, ev) {
+  // target：只写指定的那个状态位。不传则两处都写（加载时的通用提示）。
+  // 有 target 时另一处保持原样，避免同一条错误在界面上出现两遍。
+  _status: function (text, ok, ev, target) {
     var d = this._paneDoc(ev);
     if (!d) return;
-    ["bs-status", "bs-save-status"].forEach(function (id) {
+    var ids = target ? [target] : ["bs-status", "bs-save-status"];
+    ids.forEach(function (id) {
       var el = d.getElementById(id);
       if (el) {
         el.textContent = text || "";
@@ -404,10 +446,10 @@ Zotero.MkteroBilingual = {
       var incomplete = !s.api.base_url || !s.api.model;
       this._status(incomplete
         ? "已保存，但 Base URL / 模型还空着，翻译仍不可用"
-        : "已保存（密钥仅存本机）", !incomplete, ev);
+        : "已保存（密钥仅存本机）", !incomplete, ev, "bs-save-status");
       return true;
     } catch (e) {
-      this._status("保存失败：" + (e && e.message ? e.message : e), false, ev);
+      this._status("保存失败：" + (e && e.message ? e.message : e), false, ev, "bs-save-status");
       Zotero.logError(e);
       return false;
     }
@@ -436,30 +478,41 @@ Zotero.MkteroBilingual = {
       this._set("bs-keep-blocks", s.files.keep_blocks, ev);
       this._set("bs-converter-dir", s.advanced.converter_dir, ev);
       this._set("bs-python", s.advanced.python, ev);
-      this._status("已恢复默认，点「保存设置」生效", true, ev);
-    } catch (e) { this._status("重置失败", false, ev); }
+      this._status("已恢复默认，点「保存设置」生效", true, ev, "bs-save-status");
+    } catch (e) { this._status("重置失败", false, ev, "bs-save-status"); }
   },
 
   // 纯 JS 直连 API 做一次最小请求：不依赖 python、不依赖转换器目录，
   // 失败时把 HTTP 状态码和网关返回的原文显示出来，而不是一句「测试失败」。
   testLLM: function (ev) {
     var self = this;
-    if (!this.savePrefs(ev)) return;
+    if (!this.savePrefs(ev)) {
+      // 保存失败的原因刚写在底部状态位，这里挪到按钮旁边，避免同一条错误
+      // 在上下两处同时出现（看着像两个错）
+      var d0 = this._paneDoc(ev);
+      var foot = d0 && d0.getElementById("bs-save-status");
+      var msg = foot && foot.textContent;
+      if (msg) {
+        this._status(msg, false, ev, "bs-status");
+        this._status("", undefined, ev, "bs-save-status");
+      }
+      return;
+    }
 
     var s;
     try { s = MkteroConfig.read(); }
-    catch (e) { this._status("读取配置失败：" + (e && e.message ? e.message : e), false, ev); return; }
+    catch (e) { this._status("读取配置失败：" + (e && e.message ? e.message : e), false, ev, "bs-status"); return; }
 
     var base = String(s.api.base_url || "").trim();
     var model = String(s.api.model || "").trim();
     var key = String(s.api.api_key || "").trim();
 
     var v = validateApiBase(base);          // 先看地址，比模型名更基础
-    if (!v.ok) { this._status(v.error, false, ev); return; }
-    if (!model) { this._status("请先填模型名", false, ev); return; }
+    if (!v.ok) { this._status(v.error, false, ev, "bs-status"); return; }
+    if (!model) { this._status("请先填模型名", false, ev, "bs-status"); return; }
     // 本地/内网服务常常不需要 key，不要因此拦住测试（正式翻译同样放行）
     if (!key && !v.loopback) {
-      this._status("还没填 API Key（本地或内网免 key 的服务可忽略）", false, ev);
+      this._status("还没填 API Key（本地或内网免 key 的服务可忽略）", false, ev, "bs-status");
       return;
     }
 
@@ -472,11 +525,11 @@ Zotero.MkteroBilingual = {
     var btn = null;
     try { var d0 = this._paneDoc(ev); btn = d0 && d0.getElementById("bs-test-btn"); } catch (e) {}
     if (btn) { if (btn.disabled) return; btn.disabled = true; }
-    this._status("测试中…（" + url + "）", undefined, ev);
+    this._status("测试中…（" + url + "）", undefined, ev, "bs-status");
 
     var done = function (text, ok) {
       if (btn) btn.disabled = false;
-      self._status(text, ok, ev);
+      self._status(text, ok, ev, "bs-status");
     };
 
     var headers = { "Content-Type": "application/json" };
@@ -550,8 +603,10 @@ var MkteroConfig = {
   },
 
   path: function () {
+    var home = resolveHomeDir();
+    if (!home) return "";
     try {
-      return PathUtils.join(PathUtils.homeDir, ".mktero_llm_config.json");
+      return PathUtils.join(home, ".mktero_llm_config.json");
     } catch (e) {
       Zotero.logError(e);
       return "";
@@ -563,6 +618,10 @@ var MkteroConfig = {
     try {
       var p = this.path();
       if (p) raw = JSON.parse(Zotero.File.getContents(p) || "{}");
+      else {
+        try { Zotero.debug("[Mktero Bilingual] 读配置：定位不到用户主目录，用默认值"); }
+        catch (e) {}
+      }
     } catch (e) { raw = {}; }
     var s = this.merge(this.DEFAULT, raw);
     // 旧版扁平字段提升
@@ -587,7 +646,10 @@ var MkteroConfig = {
 
   write: function (s) {
     var p = this.path();
-    if (!p) throw new Error("找不到用户主目录");
+    if (!p) {
+      throw new Error("定位不到用户主目录，配置未写入。" +
+        "请打开「帮助 → 调试输出日志」搜 Mktero Bilingual 查看详情。");
+    }
     // 保留旧扁平字段，兼容命令行直接调用脚本
     var out = JSON.parse(JSON.stringify(s));
     out.base_url = s.api.base_url;
@@ -1411,6 +1473,8 @@ async function selfCheck(win) {
   }
   probe("Zotero", function () { return Zotero.version; });
   probe("插件版本", function () { return MkteroBilingual.version; });
+  probe("用户主目录", function () { return resolveHomeDir() || "未解析（配置无法保存）"; });
+  probe("配置文件", function () { return MkteroConfig.path() || "未解析"; });
   probe("右键菜单容器", function () { return !!win.document.getElementById("zotero-itemmenu"); });
   probe("Tools 菜单容器", function () { return !!win.document.getElementById("menu_ToolsPopup"); });
   probe("本插件菜单项数", function () {

@@ -22,6 +22,9 @@ const ROOT = path.resolve(__dirname, "..");
 const ADDON = path.join(ROOT, "addon");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "mb-sandbox-"));
 const PROFILE = path.join(TMP, "profile");
+// 伪装成用户主目录：配置文件的期望落点
+const HOME_DIR = path.join(TMP, "home");
+fs.mkdirSync(HOME_DIR, { recursive: true });
 
 let failures = 0;
 function ok(cond, label, extra) {
@@ -135,7 +138,7 @@ const zotero = {
       });
     }
   },
-  getMainWindows() { return []; },
+  getMainWindows() { return [mockMainWindow]; },
   getActiveZoteroPane() {
     return {
       getSelectedItems() { return mockSelected; },
@@ -166,11 +169,30 @@ const zotero = {
 };
 
 const mockTags = [];
+
+// 真实沙箱里没有 Ci，但活窗口的 Components 上能借到 nsIFile 常量；
+// Services.dirsvc.get("Home", …) 就是靠它工作的。
+class FakeNsIFile {
+  constructor(p) { this.path = p; }
+}
+const mockMainWindow = {
+  Components: { interfaces: { nsIFile: FakeNsIFile } }
+};
+
 const services = {
   prompt: {
     alert(win, title, text) { mockAlerts.push(title + "｜" + text); },
     confirm() { return true; },
     prompt() { return false; }
+  },
+  dirsvc: {
+    get(name, iface) {
+      if (name === "Home") {
+        if (!iface) throw new Error("nsIFile interface required");
+        return new FakeNsIFile(HOME_DIR);
+      }
+      throw new Error("unsupported dirsvc key: " + name);
+    }
   },
   wm: { getEnumerator() { return { hasMoreElements() { return false; } }; } }
 };
@@ -201,7 +223,9 @@ const sandbox = {
   Zotero: zotero,
   Services: services,
   IOUtils,
-  PathUtils: { homeDir: TMP, profileDir: PROFILE, join: path.join },
+  // ⚠️ 不要给 homeDir：实测 Zotero 自带的 PathUtils 上并没有这个属性，
+  // 早先图省事在这里塞了一个，正好把「保存失败：找不到用户主目录」这个 bug 遮住了。
+  PathUtils: { profileDir: PROFILE, join: path.join },
   ChromeUtils: {
     importESModule(url) {
       if (url.indexOf("Subprocess.sys.mjs") !== -1) return { Subprocess: subprocess };
@@ -263,6 +287,7 @@ function makeDoc(values) {
 }
 function ev(doc) { return { target: { ownerDocument: doc } }; }
 function statusOf(doc) { return doc.getElementById("bs-status").textContent; }
+function footStatusOf(doc) { return doc.getElementById("bs-save-status").textContent; }
 
 
 // ---------------- 假元素：菜单 / 面板共用 ----------------
@@ -404,13 +429,18 @@ function makeMenuDoc() {
   ok(!sandbox.validateApiBase("a.com/v1").ok, "缺协议被拒");
 
   console.log("\n配置读写（兼容旧扁平格式）");
-  const cfgPath = path.join(TMP, ".mktero_llm_config.json");
+  // PathUtils 上没有 homeDir 时，必须还能靠 dirsvc 拿到家目录，
+  // 否则用户看到的是「保存失败：找不到用户主目录」（0.5.3 的真实 bug）
+  eq(sandbox.resolveHomeDir(), HOME_DIR, "PathUtils 无 homeDir 时回退到 dirsvc");
+  const cfg = sandbox.MkteroConfig;
+  eq(cfg.path(), path.join(HOME_DIR, ".mktero_llm_config.json"),
+     "配置文件落在用户主目录");
+  const cfgPath = path.join(HOME_DIR, ".mktero_llm_config.json");
   fs.writeFileSync(cfgPath, JSON.stringify({
     base_url: "https://myai.example.com/llm-gw/v1/",
     model: "deepseek-v4-flash",
     api_key: "sk-test-1234567890abcdef"
   }, null, 2), "utf8");
-  const cfg = sandbox.MkteroConfig;
   const read1 = cfg.read();
   eq(read1.api.base_url, "https://myai.example.com/llm-gw/v1/", "旧字段提升到 api.base_url");
   eq(read1.api.model, "deepseek-v4-flash", "旧字段提升到 api.model");
@@ -445,6 +475,8 @@ function makeMenuDoc() {
   await new Promise(r => setTimeout(r, 50));
   ok(/HTTP 401/.test(statusOf(doc2)), "状态里出现 HTTP 401", statusOf(doc2));
   ok(/密钥无效/.test(statusOf(doc2)), "并给出密钥无效的提示", statusOf(doc2));
+  ok(!/HTTP 401/.test(footStatusOf(doc2)), "同一条错误不会在底部再显示一遍",
+     footStatusOf(doc2));
 
   console.log("\n测试连接：网络不可达");
   const doc3 = makeDoc({ "bs-base-url": "https://a.com/v1", "bs-model": "m" });
@@ -592,7 +624,7 @@ function makeMenuDoc() {
   eq(saved.translation.batch, 30, "批大小越界被钳制");
   eq(saved.files.attach, true, "复选框改动已保存");
   eq(saved.translation.target_lang, "zh-TW", "没动的字段保持不变");
-  ok(/已保存/.test(statusOf(pane)), "状态提示已保存", statusOf(pane));
+  ok(/已保存/.test(footStatusOf(pane)), "状态提示已保存", footStatusOf(pane));
   eq(pane.getElementById("bs-api-key").value, "", "保存后清空密钥输入框");
 
   console.log("\n设置面板：换密钥");
