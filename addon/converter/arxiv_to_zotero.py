@@ -662,40 +662,49 @@ class RefRegistry:
                     self.cite_num[key] = len(self.cite_order) + 1
                     self.cite_order.append(key)
 
-        # 标签 -> 编号：按 label 在文中的出现顺序，结合前文最近的 section/figure/table
-        # 先给每个 \label 记录它前面的上下文
-        for m in LABEL_RE.finditer(text):
-            tag = m.group(1)
-            before = text[:m.start()]
-            # 找该 label 所在/之前最近的结构命令
-            secs = re.findall(r"\\(section|subsection|subsubsection)\*?\s*\{", before)
-            # 这个 label 紧跟的结构命令（同一环境里）
-            near = before[-400:]
-            env_kind = None
-            if re.search(r"\\begin\{figure", near) and not re.search(r"\\end\{figure", near):
-                env_kind = "fig"
-            elif re.search(r"\\begin\{table", near) and not re.search(r"\\end\{table", near):
-                env_kind = "tab"
-            if env_kind == "fig":
-                self.fig_num += 1
-                self.ref_map[tag] = "图 %d" % self.fig_num
-            elif env_kind == "tab":
-                self.tab_num += 1
-                self.ref_map[tag] = "表 %d" % self.tab_num
+        # 交叉引用编号：先按 LaTeX 环境区间给图/表 label 归属编号，
+        # 再按 IEEE 章节层级给其余 label 编号。旧版把「前面出现过几个
+        # section/subsection/subsubsection」直接拼成 "4.7.6"，完全是错的。
+        LABEL_RE_LOCAL = re.compile(r"\\label\s*\{([^}]+)\}")
+        fig_spans = list(re.finditer(
+            r"\\begin\{figure\*?\}([\s\S]*?)\\end\{figure\*?\}", text))
+        for i, fm in enumerate(fig_spans, 1):
+            for lm in LABEL_RE_LOCAL.finditer(fm.group(0)):
+                self.ref_map[lm.group(1)] = "图 %d" % i
+        tab_spans = list(re.finditer(
+            r"\\begin\{table\*?\}([\s\S]*?)\\end\{table\*?\}", text))
+        for i, tm in enumerate(tab_spans, 1):
+            for lm in LABEL_RE_LOCAL.finditer(tm.group(0)):
+                self.ref_map[lm.group(1)] = "表 %d" % i
+        self.fig_num, self.tab_num = len(fig_spans), len(tab_spans)
+
+        # 结构命令与 label 按位置排序，滚动维护 IEEE 层级计数器
+        HEAD_LV = {"section": 0, "subsection": 1, "subsubsection": 2}
+        events = []
+        for hm in re.finditer(r"\\(section|subsection|subsubsection)\*?\s*\{", text):
+            events.append((hm.start(), "head", HEAD_LV[hm.group(1)]))
+        for lm in LABEL_RE_LOCAL.finditer(text):
+            if lm.group(1) not in self.ref_map:
+                events.append((lm.start(), "label", lm.group(1)))
+        events.sort(key=lambda x: x[0])
+        ctr = [0, 0, 0]
+        for _, kind, val in events:
+            if kind == "head":
+                ctr[val] += 1
+                for k in range(val + 1, 3):
+                    ctr[k] = 0
+            elif ctr[0]:
+                lvl = 2 if ctr[2] else (1 if ctr[1] else 0)
+                self.ref_map[val] = ieee_section_num(ctr, lvl)
             else:
-                # 章节号：按 section/subsection 层级累加
-                lvl = {"section": 0, "subsection": 1, "subsubsection": 2}
-                # 统计各自出现次数
-                nums = []
-                for cmd in ("section", "subsection", "subsubsection"):
-                    n = len(re.findall(r"\\" + cmd + r"\*?\s*\{", before))
-                    if n:
-                        nums.append((lvl[cmd], n))
-                if nums:
-                    # 用最近一层的编号组合，简化为依次拼接
-                    self.ref_map[tag] = ".".join(str(n) for _, n in sorted(nums))
+                # 还没进任何章节：按 label 名兜底，别再吐裸标签
+                nm = str(val).lower()
+                if nm.startswith(("fig", "figure")):
+                    self.ref_map[val] = "图"
+                elif nm.startswith(("tab", "table")):
+                    self.ref_map[val] = "表"
                 else:
-                    self.ref_map[tag] = tag
+                    self.ref_map[val] = val
 
     def cite(self, keys):
         nums = []
@@ -868,7 +877,7 @@ def resolve_image(ref, work_dir, out_dir, gs_bin):
             try:
                 subprocess.run(
                     [gs_bin, "-dSAFER", "-dBATCH", "-dNOPAUSE", "-q",
-                     "-sDEVICE=png16m", "-r130", "-sOutputFile=" + str(dst), str(p)],
+                     "-sDEVICE=png16m", "-r200", "-sOutputFile=" + str(dst), str(p)],
                     capture_output=True, timeout=120,
                 )
             except Exception:
@@ -912,8 +921,8 @@ def render_figure(raw, work_dir, out_dir, gs_bin):
     parts = ['<figure class="figure">']
     # 有并排子图（设计宽度 <= 0.55 版心）或本图含多张图时排两列，
     # 否则占满版心。所有图统一到 100% 或 50%，不再忽大忽小。
-    side_by_side = len(imgs) > 1 or any(r <= 0.55 for r in ratios)
-    width = 50.0 if side_by_side else 100.0
+    # 并排 50% 会因 gap 挤到换行，反而两张图都变小；统一占满版心最清楚
+    width = 100.0
     for u in imgs:
         parts.append('<img src="%s" alt="" style="width:%.1f%%;height:auto">'
                      % (u, width))
@@ -1019,6 +1028,13 @@ def restore_ph(zh, formulas, fmap):
             return '<a class="ref" href="#fig-%s">%s</a>' % (fm.group(1), val)
         return '<span class="ref">%s</span>' % val
     s = re.sub(r"\u27e6ref_([^\u27e7]*)\u27e7", ref_back, s)
+    # LLM 会把 ⟦F0⟧ 当独立词，在两侧塞一堆空格，视觉上公式像块级元素
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    fph = r"(\u27e6F\d+\u27e7)"
+    s = re.sub(r"([\u4e00-\u9fff\uff0c\u3002\u3001\uff1b\uff1a\uff09])\s+" + fph,
+               r"\1\2", s)
+    s = re.sub(fph + r"\s+([\u4e00-\u9fff\uff0c\u3002\u3001\uff1b\uff1a\uff08])",
+               r"\1\2", s)
     for i, f in enumerate(formulas or []):
         svg = fmap.get(f)
         if svg is None:
@@ -1112,8 +1128,7 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
     fig_i = 0
     zh_n = 0
     hcounters = [0, 0, 0]
-    secnum_style = ("display:inline-block;min-width:1.6em;margin-right:.45em;"
-                    "color:var(--muted,#888);font-size:.82em;font-weight:500")
+
     for b, (h, plain, formulas) in zip(blocks, rendered):
         if b["type"] == "figure":
             fig_i += 1
@@ -1137,16 +1152,16 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
             for k in range(hi + 1, 3):
                 hcounters[k] = 0
             num = ieee_section_num(hcounters, hi)
-            sn = '<span class="secnum" style="%s">%s</span> ' % (secnum_style, num)
+            sn = '<span class="secnum">%s</span> ' % num
             if zh:
                 zh_n += 1
                 parts.append(
-                    '<h%s id="%s" class="bi-head">%s<span class="he">%s</span>'
+                    '<h%s id="%s" class="bi-head"><span class="he">%s%s</span>'
                     '<span class="hz">%s</span></h%s>'
                     % (lvl, sid, sn, html_mod.escape(en), html_mod.escape(zh), lvl)
                 )
             else:
-                parts.append('<h%s id="%s" class="bi-head">%s%s</h%s>'
+                parts.append('<h%s id="%s" class="bi-head"><span class="he">%s%s</span></h%s>'
                              % (lvl, sid, sn, html_mod.escape(en), lvl))
             continue
         if zh:

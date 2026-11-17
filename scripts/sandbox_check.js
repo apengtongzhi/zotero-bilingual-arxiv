@@ -775,6 +775,13 @@ function makeMenuDoc() {
     eq(r.ratio_full, 1, "只写 scale 时按整版心");
     ok(r.ratio_half < 0.6, "width=0.48\\linewidth 识别为并排子图",
        String(r.ratio_half));
+    eq(r.refs["fig:one"], "图 1", "figure 内的 label 归属图 1", JSON.stringify(r.refs));
+    eq(r.refs["fig:two"], "图 2", "第二个 figure 归属图 2");
+    ok(!/\d+\.\d+\.\d+/.test(JSON.stringify(r.refs)),
+       "不再拼出 4.7.6 这种假编号", JSON.stringify(r.refs));
+    eq(r.css_override, true, "公式容器压紧样式存在");
+    eq(r.secnum_inline, true, "章节序号与标题同行");
+    eq(r.img_full, true, "图片统一占满版心");
   } else {
     ok(false, "python 探针可运行", String(probe.stderr || "").slice(0, 200));
   }

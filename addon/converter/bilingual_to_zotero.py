@@ -478,10 +478,28 @@ def build_body(md_path, math_on, imgs):
     return body, len(blocks), pairs[0], toc
 
 
+# 放在 MathJax 注入的 math_css 之后，覆盖它那些留白很大的默认样式
+CSS_OVERRIDE = """
+/* 行内公式压紧：MathJax 默认给 mjx-container 留白、溢出滚动，看着像块级公式 */
+mjx-container{display:inline-block!important;max-width:100%!important;
+ overflow:visible!important;margin:0 .1em!important;padding:0!important;
+ vertical-align:baseline!important;text-align:inherit!important;line-height:1!important}
+mjx-container[display="true"]{display:block!important;text-align:center!important;
+ margin:.35em 0!important}
+mjx-container > svg{display:inline-block;vertical-align:baseline}
+/* 章节序号与标题同行、同字号 */
+.bi-head .secnum{display:inline;font-size:inherit;font-weight:inherit;
+ color:inherit;min-width:0;margin:0 .55em 0 0;opacity:.72}
+.toc .secnum{display:inline;font-size:.9em;opacity:.7;margin-right:.35em}
+/* 图片一律占满版心，不忽大忽小 */
+.figure img{width:100%!important;max-width:100%!important;height:auto!important}
+"""
+
+
 def page(body, math_css=""):
     head = (
         '<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-        "<title>双语论文</title><style>" + CSS + math_css + "</style>"
+        "<title>双语论文</title><style>" + CSS + math_css + CSS_OVERRIDE + "</style>"
     )
     return '<!DOCTYPE html><html lang="zh-CN"><head>%s</head><body>%s</body></html>' % (head, body)
 

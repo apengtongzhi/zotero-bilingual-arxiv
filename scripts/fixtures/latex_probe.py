@@ -41,7 +41,22 @@ Y.~Wang, ``Transformer-empowered {6G} networks,'' 2022.
 order, entries = a.load_bbl(bbl_dir)
 shutil.rmtree(bbl_dir, ignore_errors=True)
 
+ref_sample = (
+    r"\section{Intro}\label{sec:a}"
+    r"\subsection{Sub}\label{sec:b}"
+    r"\begin{figure}\caption{X}\label{fig:one}\end{figure}"
+    r"\begin{figure}\caption{Y}\label{fig:two}\end{figure}"
+    r"\section{Sim}\ref{fig:one} \ref{fig:two}"
+)
+rr = a.RefRegistry(ref_sample)
+css = (Path(__file__).resolve().parent.parent.parent / "addon" / "converter"
+       / "bilingual_to_zotero.py").read_text(encoding="utf-8")
+
 print(json.dumps({
+    "refs": {k: rr.ref(k) for k in ("fig:one", "fig:two", "sec:a", "sec:b")},
+    "css_override": "mjx-container{display:inline-block!important" in css,
+    "secnum_inline": ".bi-head .secnum{display:inline" in css,
+    "img_full": ".figure img{width:100%!important" in css,
     "ieee_l1": [a.ieee_section_num([i, 0, 0], 0) for i in (1, 2, 4)],
     "ieee_l2": [a.ieee_section_num([2, i, 0], 1) for i in (1, 2)],
     "ieee_l3": [a.ieee_section_num([2, 1, i], 2) for i in (1, 2)],

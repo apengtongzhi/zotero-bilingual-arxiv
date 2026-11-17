@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.8
+
+按截图逐条修排版与引用：
+
+- **行内公式占太多空间**：MathJax 给 `mjx-container` 注入的样式带留白和
+  `overflow:auto`，加上 LLM 会把 `⟦F0⟧` 占位符当独立词、两侧塞一堆空格，
+  看起来就像块级公式。现在在 MathJax CSS 之后追加覆盖规则
+  （`inline-block` / `margin:0` / `overflow:visible`），并压缩译文里占位符两侧的多余空白；
+  真正的 display 公式 margin 也压到 `.35em`
+- **序号和标题分行、字号不同**：`secnum` 原来带 `.82em` 内联字号且排在
+  `display:block` 的 `.he` 外面，被挤到上一行。现在把序号放进 `.he` 内、
+  字号继承标题，目录里单独保留小号
+- **图小得看不清**：并排子图的两个 50% 因 flex gap 挤到换行，反而每张都只占半版心。
+  现在所有图统一 100% 纵向排列；GhostScript 分辨率从 130dpi 提到 200dpi
+- **「图 4.7.6」这种假编号**：旧 `RefRegistry` 把 label 前面出现过几个
+  section/subsection/subsubsection 直接拼成编号，且 `egin{figure}` 只在 label 前
+  400 字符内查找，很多图 label 漏判、没索引。现在按 `figure/table` 环境区间给 label
+  归属 `图 N` / `表 N`，其余按 IEEE 章节层级编号。实测 6 个图全部有
+  `id=fig-N` + `图 N` 标签，15 处图引用全部可点，`4.7.6` 完全消失
+
 ## 0.6.7
 
 排版细节对齐 IEEEtran 论文：
