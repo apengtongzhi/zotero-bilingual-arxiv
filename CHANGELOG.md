@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.5
+
+修「保存失败：file.exists is not a function」——0.5.4 修掉家目录之后紧接着撞上的第二个坑：
+
+- `Zotero.File.putContents(file, data)` 的第一参**必须是 nsIFile**，函数体第一行就是 `file.exists()`；传路径字符串会抛这个错。现在改为传 `Zotero.File.pathToFile(路径)`。（注意与它不对称的 `putContentsAsync(path, data)` 是接受字符串的，所以光看名字容易写错）
+- 顺手把 `new Zotero.ProgressWindow().ItemProgress(...)` 的参数改对：第一个参数是图标键 `"document"`，第二个才是文本，之前进度窗口里没图标
+- 把用到的 Zotero API 全量对着 Zotero 自己的源码核了一遍（`Zotero.File.*` / `Attachments.importFromFile` / `PreferencePanes.register` / `Utilities.Internal.openPreferences` / `HTTP.request` / `ProgressWindow` / `IOUtils.*` 签名与选项名），没有其它对不上的
+- `scripts/sandbox_check.js` 的 `putContents` 桩改为**照着真实实现挑错**：传字符串就抛 `TypeError("file.exists is not a function")`。之前这个桩接受字符串，又一次把 bug 让到了你机器上——桩比真实实现宽松，测试就等于没用
+
 ## 0.5.4
 
 修复「点保存/测试连接一律显示『保存失败：找不到用户主目录』」：

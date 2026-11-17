@@ -655,7 +655,10 @@ var MkteroConfig = {
     out.base_url = s.api.base_url;
     out.model = s.api.model;
     if (s.api.api_key) out.api_key = s.api.api_key;
-    Zotero.File.putContents(p, JSON.stringify(out, null, 2));
+    // ⚠️ Zotero.File.putContents(file, str) 第一参必须是 nsIFile：
+    // 它内部直接 file.exists()，传字符串会抛「file.exists is not a function」。
+    // （同名的 putContentsAsync 倒是接受路径字符串，两者不对称）
+    Zotero.File.putContents(Zotero.File.pathToFile(p), JSON.stringify(out, null, 2));
     // 密钥文件收紧到 600（异步执行，失败不影响保存结果）
     try {
       IOUtils.setPermissions(p, 0o600).catch(function () {});
@@ -1287,7 +1290,8 @@ function progress(text) {
   try {
     var pw = new Zotero.ProgressWindow({ closeOnClick: false });
     pw.changeHeadline("Mktero 双语阅读快照");
-    var item = new pw.ItemProgress(text);
+    // ItemProgress(itemType, text)：第一个参数是图标键，不是文本
+    var item = new pw.ItemProgress("document", text);
     pw.show();
     return function (done) {
       try {

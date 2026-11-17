@@ -108,11 +108,21 @@ const zotero = {
   },
   File: {
     pathToFile: fileObj,
-    putContents(p, data) {
+    // 真实实现第一参必须是 nsIFile：函数体第一行就是 file.exists()。
+    // 传路径字符串会抛「file.exists is not a function」。这里如实照做——
+    // 之前这个桩接受字符串，正好把这个 bug 遮到了用户机器上。
+    putContents(file, data) {
+      if (!file || typeof file !== "object" || typeof file.exists !== "function") {
+        throw new TypeError("file.exists is not a function");
+      }
+      const p = file.path;
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, String(data), "utf8");
     },
-    getContents(p) { return fs.readFileSync(p, "utf8"); },
+    // 与真实实现一致：getContents 允许传路径字符串
+    getContents(file) {
+      return fs.readFileSync(typeof file === "string" ? file : file.path, "utf8");
+    },
     async getContentsAsync(p) { return fsp.readFile(p, "utf8"); },
     async putContentsAsync(p, data) { await IOUtils.writeUTF8(p, data); },
     // 模拟 jar: 读取：直接映射到源码目录
