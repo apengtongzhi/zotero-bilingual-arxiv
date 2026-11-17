@@ -99,7 +99,32 @@ def strip_comments(text):
 
 
 # ---------------------------------------------------------------- 下载与解压
-def fetch_source(arxiv_id, cache_dir):
+# GhostScript 的可执行文件。插件拉起本脚本时 PATH 往往只有
+# /usr/bin:/bin:/usr/sbin:/sbin，Homebrew 装的 gs 不在里面，
+# 于是 shutil.which("gs") 返回 None，PDF/eps 图全部「未能定位」。
+GS_CANDIDATES = [
+    "/opt/homebrew/bin/gs",
+    "/usr/local/bin/gs",
+    "/opt/local/bin/gs",
+    "/usr/bin/gs",
+    "/snap/bin/gs",
+]
+
+
+def find_ghostscript():
+    got = shutil.which("gs")
+    if got:
+        return got
+    for c in GS_CANDIDATES:
+        try:
+            if Path(c).is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def fetch_source(arxiv_id, cache_dir, proxy=""):
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", arxiv_id)
@@ -110,11 +135,11 @@ def fetch_source(arxiv_id, cache_dir):
     url = "https://export.arxiv.org/e-print/" + urllib.parse.quote(arxiv_id, safe="")
     log("下载 e-print：%s" % url)
     # curl 在本机对 arxiv 已验证可用，且比 urllib 更少受代理环境影响
-    r = subprocess.run(
-        ["curl", "-sS", "-L", "--fail", "--max-time", "120", "-A", UA,
-         "-o", str(dest), url],
-        capture_output=True, timeout=150,
-    )
+    cmd = ["curl", "-sS", "-L", "--fail", "--max-time", "120", "-A", UA,
+           "-o", str(dest), url]
+    if proxy:
+        cmd[1:1] = ["--proxy", proxy]
+    r = subprocess.run(cmd, capture_output=True, timeout=150)
     if r.returncode != 0 or not dest.exists() or dest.stat().st_size < 1000:
         raise RuntimeError("arXiv 源码下载失败：%s" %
                            r.stderr.decode("utf-8", "replace")[-300:])
@@ -875,6 +900,8 @@ def main():
     ap.add_argument("--id", default="", help="arXiv ID，如 1706.03762")
     ap.add_argument("--src", default="", help="本地已下载的 e-print（tar.gz / tex.gz）或源码目录")
     ap.add_argument("--out", required=True, help="输出目录")
+    ap.add_argument("--proxy", default="",
+                    help="HTTP 代理，如 http://127.0.0.1:7897（插件会自动探测）")
     ap.add_argument("--name", default="arxiv-latex-preview", help="输出 HTML 文件名（不含扩展名）")
     ap.add_argument("--name-file", default="",
                     help="UTF-8 文件读取输出文件名，避免命令行传中文被系统损坏")
@@ -895,7 +922,7 @@ def main():
                 a.name = got
     cache = Path(a.cache).resolve() if a.cache else out_dir / "_arxiv_cache"
     work = out_dir / "_arxiv_src"
-    gs_bin = shutil.which("gs")
+    gs_bin = find_ghostscript()
 
     if a.src:
         src = Path(a.src).expanduser().resolve()
@@ -904,7 +931,7 @@ def main():
         else:
             work = unpack_source(src, work)
     elif a.id:
-        gz = fetch_source(a.id.strip(), cache)
+        gz = fetch_source(a.id.strip(), cache, a.proxy)
         work = unpack_source(gz, work)
     else:
         sys.exit("需要 --id 或 --src")

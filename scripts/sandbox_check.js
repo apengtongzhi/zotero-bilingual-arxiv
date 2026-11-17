@@ -641,6 +641,12 @@ function makeMenuDoc() {
   ok(/检索 arXiv 失败/.test(errMsg), "指出是检索失败", errMsg);
   ok(/Extra/.test(errMsg), "并告诉用户可以手填 Extra 绕过", errMsg);
 
+  console.log("\n代理设置");
+  prefs.delete("extensions.mkterobilang.proxy");
+  eq(sandbox.proxyUrl(), "", "默认不套用系统代理（实测系统代理会让网关连不上）");
+  prefs.set("extensions.mkterobilang.proxy", "http://127.0.0.1:7897");
+  eq(sandbox.proxyUrl(), "http://127.0.0.1:7897", "手填的代理会传给转换器");
+
   console.log("\n配置读写（兼容旧扁平格式）");
   // PathUtils 上没有 homeDir 时，必须还能靠 dirsvc 拿到家目录，
   // 否则用户看到的是「保存失败：找不到用户主目录」（0.5.3 的真实 bug）

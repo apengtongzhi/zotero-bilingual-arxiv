@@ -214,6 +214,20 @@ async function ensureConverterDir() {
   return MkteroBilingual.converterDir;
 }
 
+// ---- 网络代理 ----
+// 只认设置里手填的地址，不再自动套用系统代理。
+// 原因：macOS 上 python 的 urllib 会自己读取系统代理，而实测系统里的
+// Clash(127.0.0.1:7897) 会让 myai.bupt.edu.cn 直接 SSL_ERROR_SYSCALL，
+// 直连反而正常。自动套用会把「本来能通的」弄成不通，所以默认直连，
+// 需要代理的人显式填写。
+function proxyUrl() {
+  try {
+    return String(Zotero.Prefs.get(PREFIX + "proxy", true) || "").trim();
+  } catch (e) {
+    return "";
+  }
+}
+
 // ---- OpenAI 兼容接口地址 ----
 // ⚠️ 这里的规则必须和 converter/arxiv_translate.py 的 chat_endpoint() 完全一致，
 // 否则会出现「测试连接成功、翻译却 404」这种最难查的错。
@@ -398,6 +412,7 @@ Zotero.MkteroBilingual = {
     this._set("bs-keep-blocks", s.files.keep_blocks, ev);
     this._set("bs-converter-dir", s.advanced.converter_dir, ev);
     this._set("bs-python", s.advanced.python, ev);
+    this._set("bs-proxy", s.advanced.proxy, ev);
   },
 
   // 表单没加载出来（_get 返回 fallback）时保留原配置，避免把已有设置清空；
@@ -436,6 +451,7 @@ Zotero.MkteroBilingual = {
     s.advanced.converter_dir = String(
       this._get("bs-converter-dir", e.advanced.converter_dir || "", ev)).trim();
     s.advanced.python = String(this._get("bs-python", e.advanced.python || "", ev)).trim();
+    s.advanced.proxy = String(this._get("bs-proxy", e.advanced.proxy || "", ev)).trim();
     return s;
   },
 
@@ -447,6 +463,7 @@ Zotero.MkteroBilingual = {
       // 同步转换器/python 到旧 prefs（runPython 等仍在用）
       if (s.advanced.converter_dir) setPref("converterDir", s.advanced.converter_dir);
       if (s.advanced.python) setPref("python", s.advanced.python);
+      setPref("proxy", s.advanced.proxy || "");
       var d = this._paneDoc(ev);
       if (d) { var k = d.getElementById("bs-api-key"); if (k) k.value = ""; }
       var incomplete = !s.api.base_url || !s.api.model;
@@ -484,6 +501,7 @@ Zotero.MkteroBilingual = {
       this._set("bs-keep-blocks", s.files.keep_blocks, ev);
       this._set("bs-converter-dir", s.advanced.converter_dir, ev);
       this._set("bs-python", s.advanced.python, ev);
+      this._set("bs-proxy", s.advanced.proxy, ev);
       this._status("已恢复默认，点「保存设置」生效", true, ev, "bs-save-status");
     } catch (e) { this._status("重置失败", false, ev, "bs-save-status"); }
   },
@@ -605,7 +623,7 @@ var MkteroConfig = {
                    glossary: true, retries: 3, resume: true },
     files: { output_dir: "", keep_source: false, keep_cache: false,
              keep_blocks: false, attach: true, open_after: true },
-    advanced: { converter_dir: "", python: "" }
+    advanced: { converter_dir: "", python: "", proxy: "" }
   },
 
   path: function () {
@@ -677,6 +695,7 @@ var PREFIX = "extensions.mkterobilang.";
 
 var DEFAULTS = {
   converterDir: "",        // 运行时从插件内置 converter/ 目录解析
+  proxy: "",               // 手动指定代理；留空自动探测系统代理
   python: "/usr/bin/python3",
   lastDir: ""
 };
@@ -1573,11 +1592,14 @@ async function generateFromArxiv(win, item, arxivId) {
     return;
   }
 
+  var proxy = proxyUrl();
   var finish = progress("正在从 arXiv「" + arxivId + "」下载并解析 LaTeX…");
   try {
     // 第一步：下载 + 解析（产出 arxiv_blocks.json 与单语预览）
-    await runScript([py, parseScript, "--id", arxivId, "--out", outDir,
-                     "--name-file", nameFile]);
+    var parseArgs = [py, parseScript, "--id", arxivId, "--out", outDir,
+                     "--name-file", nameFile];
+    if (proxy) parseArgs.push("--proxy", proxy);
+    await runScript(parseArgs);
     finish(true);
 
     // 第二步：翻译（调用本机私有 API 配置，约 3-5 分钟）
@@ -1594,6 +1616,7 @@ async function generateFromArxiv(win, item, arxivId) {
     if (llmCfg && Zotero.File.pathToFile(llmCfg).exists()) {
       transArgs.push("--config", llmCfg);
     }
+    if (proxy) transArgs.push("--proxy", proxy);
     try {
       await runScript(transArgs);
       finish2(true);
@@ -1623,11 +1646,7 @@ async function generateFromArxiv(win, item, arxivId) {
       throw new Error("未找到生成的 HTML，输出目录：" + outDir);
     }
 
-    var attId = null;
-    if (fileCfg.attach !== false) {
-      attId = await attachSnapshot(item, html, name, ["arXiv"]);
-      if (fileCfg.open_after !== false) openAttachment(attId);
-    }
+    var attId = await safeAttach(win, item, html, name, ["arXiv"], fileCfg);
 
     // 按文件设置清理中间产物
     try {
@@ -1725,6 +1744,23 @@ async function attachSnapshot(item, html, name, extraTags) {
   (extraTags || []).forEach(function (t) { try { att.addTag(t); } catch (e) {} });
   await att.saveTx();
   return att.id;
+}
+
+// 挂附件失败不能连累已经生成好的 HTML：把原因说清楚，文件照样留给用户
+async function safeAttach(win, item, html, name, extraTags, fileCfg) {
+  if (!fileCfg || fileCfg.attach === false) return null;
+  try {
+    var attId = await attachSnapshot(item, html, name, extraTags);
+    if (attId && fileCfg.open_after !== false) openAttachment(attId);
+    return attId;
+  } catch (e) {
+    Zotero.logError(e);
+    alertWin(win, "快照已生成，但没能挂到条目上",
+      "HTML 已生成：\n" + html + "\n\n"
+      + "挂载失败原因：\n" + String(e && e.message ? e.message : e) + "\n\n"
+      + "可以直接双击上面的文件阅读；也可以手动拖进 Zotero 条目当附件。");
+    return null;
+  }
 }
 
 function openAttachment(attId) {
@@ -1846,11 +1882,7 @@ async function run(win, mode) {
         + "\n请查看 Zotero 错误控制台。");
     }
 
-    var attId = null;
-    if (fileCfg.attach !== false) {
-      attId = await attachSnapshot(item, html, name);
-      if (fileCfg.open_after !== false) openAttachment(attId);
-    }
+    var attId = await safeAttach(win, item, html, name, [], fileCfg);
     await cleanupTempFiles(outDir, fileCfg, ["_mktero_result.txt", "_mktero_name.txt"]);
 
     finish(true);

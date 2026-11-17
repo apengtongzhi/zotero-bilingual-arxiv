@@ -177,10 +177,47 @@ def ping_llm(base, model, key, settings=None):
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _open(req, timeout) as r:
         d = json.loads(r.read().decode("utf-8"))
     msg = d["choices"][0]["message"]
     return (msg.get("content") or msg.get("reasoning_content") or ""), d.get("usage", {})
+
+
+# 网络代理。Zotero 拉起本脚本时环境里没有 HTTP(S)_PROXY，而不少机构网关
+# （含 myai.bupt.edu.cn）必须过代理才握手得上，否则一律
+# "EOF occurred in violation of protocol"。所以由插件探测系统代理再显式传进来。
+_PROXY = ""
+# 默认「不走代理」的 opener。macOS 上 urllib 会通过 _scproxy 自动读取系统代理，
+# 而 Zotero 拉起的子进程没有环境变量可以覆盖这个行为——实测系统里的 Clash
+# (127.0.0.1:7897) 会让 myai.bupt.edu.cn 直接 SSL_ERROR_SYSCALL，而直连正常。
+# 所以这里显式决定：没配置就直连；配置了才走指定的代理。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def set_proxy(url):
+    global _PROXY, _OPENER
+    _PROXY = (url or "").strip()
+    if _PROXY:
+        handler = urllib.request.ProxyHandler({"http": _PROXY, "https": _PROXY})
+        _OPENER = urllib.request.build_opener(handler)
+    else:
+        _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _is_loopback(url):
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except Exception:
+        return False
+    return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
+
+
+def _open(req, timeout):
+    # 本机服务一律不代理，避免「代理连不上 localhost」
+    if _is_loopback(getattr(req, "full_url", "")):
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({})).open(req, timeout=timeout)
+    return _OPENER.open(req, timeout=timeout)
 
 
 def call_llm(base, model, key, text, attempts=3, settings=None):
@@ -209,7 +246,7 @@ def call_llm(base, model, key, text, attempts=3, settings=None):
     last = None
     for i in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _open(req, timeout) as r:
                 d = json.loads(r.read().decode("utf-8"))
             return d["choices"][0]["message"]["content"], d.get("usage", {})
         except urllib.error.HTTPError as e:
@@ -265,6 +302,8 @@ def main():
     ap.add_argument("--base-url", default="")
     ap.add_argument("--model", default="")
     ap.add_argument("--api-key", default="")
+    ap.add_argument("--proxy", default="",
+                    help="HTTP 代理，如 http://127.0.0.1:7897（插件会自动探测）")
     a = ap.parse_args()
 
     base, model, key, settings = load_config(a)
@@ -274,6 +313,7 @@ def main():
     max_chars = a.max_chars if a.max_chars != 2600 else int(tr.get("max_chars", 2600))
     resume = bool(tr.get("resume", True))
 
+    set_proxy(a.proxy)
     if a.test_llm:
         try:
             reply, usage = ping_llm(base, model, key, settings=settings)
@@ -387,6 +427,15 @@ def main():
 
     print("\n完成：成功 %d，失败 %d，总 tokens %d" % (ok, len(failed), used_tokens))
     print("译文文件：" + str(out))
+    if not ok:
+        # 全失败却退 0，插件会以为翻译完成、把整篇当「无译文」排版出单语 HTML。
+        # 这里必须让上游看见失败原因。
+        print("错误：所有块都翻译失败，已中止。" + (
+              "（已设置代理：" + _PROXY + "）" if _PROXY else
+              "（当前为直连；若你的网络必须过代理才能访问该接口，"
+              "请在设置 → 高级 → 网络代理里填地址，例如 http://127.0.0.1:7897）"),
+              file=sys.stderr)
+        sys.exit(3)
     if failed:
         print("失败块（重跑本命令会自动跳过已完成的）：" + ", ".join(failed[:40]))
         if len(failed) > 40:

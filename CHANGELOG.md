@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.2
+
+修「翻译完全没生效、正文全是英文」，以及「图丢失」「没挂回 Zotero」：
+
+- **翻译全失败却当成成功**：脚本一块都没翻成时仍然 `exit 0`，还写出一个空的译文 JSON，
+  插件于是把整篇当「无译文」排版成单语 HTML，看起来像「翻译功能坏了」。
+  现在只要 `成功==0` 就写 stderr 并非零退出，插件会把真实原因弹出来
+- **翻译失败的真正原因是代理**：macOS 上 python 的 `urllib` 会自动套用系统代理，
+  而系统里的 Clash（`127.0.0.1:7897`）访问 `myai.bupt.edu.cn` 直接
+  `SSL_ERROR_SYSCALL`——curl 直连反而是 401（通的）。现在转换器**默认直连、不读系统代理**，
+  设置「高级」里新增「网络代理」一项，确实需要的人手填地址（也支持 arXiv 下载走代理）
+- **图全部「未能定位」**：PDF/EPS 图要靠 GhostScript 转 PNG，但插件拉起 python 时 PATH 只有
+  `/usr/bin:/bin:/usr/sbin:/sbin`，`shutil.which("gs")` 找不到 Homebrew 装的 gs。
+  现在按 `/opt/homebrew/bin/gs`、`/usr/local/bin/gs` 等常见位置逐个找
+- **挂附件失败会连累整个流程**：改为独立处理，失败就明说原因并把已生成的 HTML 路径给出来，
+  不再笼统显示「按设置未自动挂到 Zotero」
+- 设置面板「高级」页新增「网络代理」
+
 ## 0.6.1
 
 修「找不到 arXiv 转换器：/arxiv_to_zotero.py」——路径里那个孤零零的斜杠说明转换器目录是空串：
