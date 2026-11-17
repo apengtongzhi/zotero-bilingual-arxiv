@@ -22,6 +22,7 @@ var MkteroBilingual = {
   version: null,
   rootURI: null,
   converterDir: null,   // 运行时解析出的转换器目录（jar 包会解压到 profile 下）
+  started: false,       // startup 全部就绪后才允许挂菜单
   registrations: []
 };
 
@@ -174,8 +175,13 @@ async function ensureConverterDir() {
     "mktero-bilingual-converter",
     String(MkteroBilingual.version || "0")
   );
+  // 主脚本在就认为已经解压过：不再每次重试那 2MB 的 tex-svg.js
+  // （它解压失败也没关系，formula_svg.py 会自己从 xpi 里读）
+  var mainPath = PathUtils.join(target, "bilingual_to_zotero.py");
+  var mainReady = false;
+  try { mainReady = await IOUtils.exists(mainPath); } catch (e) {}
   var missing = [];
-  for (var i = 0; i < CONVERTER_FILES.length; i++) {
+  for (var i = 0; i < CONVERTER_FILES.length && !mainReady; i++) {
     var ok = false;
     try { ok = await IOUtils.exists(PathUtils.join(target, CONVERTER_FILES[i])); } catch (e) {}
     if (!ok) missing.push(CONVERTER_FILES[i]);
@@ -678,10 +684,33 @@ var DEFAULTS = {
 // 插件自带的转换器目录：安装态由 ensureConverterDir() 从 xpi 解压到 profile，
 // 开发态直接用源码目录。缓存结果，避免每次 getPref 都去碰磁盘。
 function builtinConverterDir() {
-  if (MkteroBilingual.converterDir !== null) return MkteroBilingual.converterDir;
+  // 只缓存解析成功的结果。以前会把 "" 也缓存下来，一旦在解压完成前被问过一次，
+  // 后面一直拿到空串，报「找不到 arXiv 转换器：/arxiv_to_zotero.py」。
+  if (MkteroBilingual.converterDir) return MkteroBilingual.converterDir;
   var dir = converterDirFromRootURI();
-  MkteroBilingual.converterDir = dir;
-  return dir;
+  if (dir) MkteroBilingual.converterDir = dir;
+  return dir || "";
+}
+
+// 真正要用转换器时的统一入口：内存里没有就现场解压一次（幂等），
+// 免得受启动时序影响——onMainWindowLoad 可能比 startup 里的解压更早跑到。
+async function requireConverterDir() {
+  var dir = getPref("converterDir") || builtinConverterDir();
+  if (dir && Zotero.File.pathToFile(dir).exists()) return dir;
+  try {
+    dir = await ensureConverterDir();
+  } catch (e) {
+    Zotero.logError(e);
+  }
+  return dir || "";
+}
+
+function converterMissingError(dir) {
+  return "找不到转换器脚本（目录：" + (dir || "空") + "）。\n"
+    + "插件版本：" + (MkteroBilingual.version || "?") + "\n"
+    + "安装位置：" + (MkteroBilingual.rootURI || "?") + "\n\n"
+    + "请打开「工具 → 双语快照：自检…」看「转换器目录」一行；"
+    + "若为空，重启一次 Zotero 通常就会解压好。";
 }
 
 function getPref(name) {
@@ -893,9 +922,14 @@ async function startup({ id, version, rootURI }, reason) {
       addMenus(win);
     }
   });
+  MkteroBilingual.started = true;
 }
 
 function onMainWindowLoad({ window }) {
+  // Zotero 可能在 startup 的异步解压还没结束时就调到这里。那时候挂菜单，
+  // 用户马上点会拿到空的转换器目录（0.6.0 的真实报错）。startup 结束时本来就会
+  // 给所有窗口挂一遍菜单，这里只需在「已就绪」后处理后续新开的窗口。
+  if (!MkteroBilingual.started) return;
   addMenus(window);
 }
 
@@ -1043,12 +1077,10 @@ async function runPython(mdPath, outDir, name) {
   }
   var py = resolvePython();
   if (!py) throw new Error("找不到 python3，请在设置「高级」里指定可执行文件路径");
-  var converterDir = getPref("converterDir");
-  var scriptPath = converterDir + "/bilingual_to_zotero.py";
-  if (!Zotero.File.pathToFile(scriptPath).exists()) {
-    throw new Error("找不到转换器：" + scriptPath
-      + "\n如果插件是从 .xpi 安装的，转换器应已解压到 profile 目录；"
-      + "也可以到设置「高级」里手动指定转换器目录。");
+  var converterDir = await requireConverterDir();
+  var scriptPath = converterDir ? converterDir + "/bilingual_to_zotero.py" : "";
+  if (!scriptPath || !Zotero.File.pathToFile(scriptPath).exists()) {
+    throw new Error(converterMissingError(converterDir));
   }
   var res = await runProcess(py, [
     scriptPath, "--md", mdPath, "--out", outDir,
@@ -1526,7 +1558,7 @@ async function generateFromArxiv(win, item, arxivId) {
   } catch (e) {
     try { await Zotero.File.putContentsAsync(nameFile, name); } catch (e2) {}
   }
-  var converter = getPref("converterDir");
+  var converter = await requireConverterDir();
   var py = resolvePython();
   if (!py) {
     alertWin(win, "arXiv 双语快照", "找不到 python3，请在设置里指定。");
@@ -1534,10 +1566,10 @@ async function generateFromArxiv(win, item, arxivId) {
   }
   var parseScript = converter + "/arxiv_to_zotero.py";
   var transScript = converter + "/arxiv_translate.py";
-  if (!Zotero.File.pathToFile(parseScript).exists() ||
-      !Zotero.File.pathToFile(transScript).exists()) {
-    alertWin(win, "arXiv 双语快照",
-      "找不到 arXiv 转换器：" + parseScript + "\n请确认转换器目录设置正确、脚本已放入。");
+  if (!converter
+      || !Zotero.File.pathToFile(parseScript).exists()
+      || !Zotero.File.pathToFile(transScript).exists()) {
+    alertWin(win, "arXiv 双语快照", converterMissingError(converter));
     return;
   }
 

@@ -6,10 +6,12 @@
 Zotero 网页快照无需执行任何脚本即可显示公式。
 """
 import html as html_mod
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -23,7 +25,59 @@ CHROME_CANDIDATES = [
     "/usr/bin/chromium",
 ]
 CHROME = next((p for p in CHROME_CANDIDATES if Path(p).exists()), None)
-MATHJS = HERE / "vendor" / "tex-svg.js"
+
+
+def _resolve_mathjs():
+    """定位 MathJax 的 tex-svg.js。
+
+    正常情况：插件从 .xpi 安装时，JS 侧会把 converter/ 解压到
+    <profile>/mktero-bilingual-converter/<版本>/，这里就有一份。
+
+    但 2MB 的单文件走 Zotero 的 jar 通道解压并不总是成功（读出来可能是空串，
+    解压目录里只剩一个空的 vendor/），于是留后路：直接从装好的 .xpi 里读。
+    两者都拿不到就返回原路径，调用方会按「缺文件」降级成 LaTeX 文本。
+    """
+    local = HERE / "vendor" / "tex-svg.js"
+    try:
+        if local.exists() and local.stat().st_size > 4096:
+            return local
+    except OSError:
+        pass
+
+    candidates = []
+    env_xpi = os.environ.get("MKTERO_XPI", "")
+    if env_xpi:
+        candidates.append(Path(env_xpi))
+    # 安装态布局：<profile>/mktero-bilingual-converter/<ver>/ 的对门是
+    # <profile>/extensions/*.xpi
+    for parent in HERE.parents:
+        try:
+            candidates.extend(sorted(parent.glob("extensions/*.xpi")))
+        except OSError:
+            continue
+        if len(candidates) > 6:
+            break
+
+    for xpi in candidates:
+        try:
+            if not xpi.is_file():
+                continue
+            with zipfile.ZipFile(xpi) as z:
+                data = z.read("converter/vendor/tex-svg.js")
+        except (OSError, KeyError, zipfile.BadZipFile):
+            continue
+        if len(data) <= 4096:
+            continue
+        out = Path(tempfile.gettempdir()) / "mktero-tex-svg.js"
+        try:
+            out.write_bytes(data)
+            return out
+        except OSError:
+            continue
+    return local
+
+
+MATHJS = _resolve_mathjs()
 CONFIG = (
     "window.MathJax={"
     "tex:{inlineMath:[['$','$']],displayMath:[['$$','$$']],processEscapes:false},"

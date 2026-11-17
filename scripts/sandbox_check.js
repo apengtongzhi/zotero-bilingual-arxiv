@@ -758,6 +758,27 @@ function makeMenuDoc() {
   const dir2 = await sandbox.ensureConverterDir();
   eq(dir2, path.join(ADDON, "converter"), "file:// 时直接指向 addon/converter");
 
+  console.log("\n转换器目录：启动时序竞争（0.6.0 的真实报错）");
+  mb.rootURI = "jar:file:///tmp/fake-plugin.xpi!/";
+  mb.version = "0.6.0";
+  mb.converterDir = null;
+  prefs.delete("extensions.mkterobilang.converterDir");
+  eq(sandbox.builtinConverterDir(), "", "解压完成前解析不出目录");
+  eq(mb.converterDir, null, "空结果不写进缓存（否则以后一直报找不到转换器）");
+  const onDemand = await sandbox.requireConverterDir();
+  ok(!!onDemand && fs.existsSync(path.join(onDemand, "arxiv_to_zotero.py")),
+     "真正要用的时候现场解压一次", String(onDemand));
+  eq(await sandbox.requireConverterDir(), onDemand, "再取一次结果稳定（幂等）");
+
+  console.log("\n菜单：startup 未就绪时不要挂");
+  mb.started = false;
+  const early = makeMenuDoc();
+  sandbox.onMainWindowLoad({ window: { document: early } });
+  eq(early.count(), 0, "startup 还没就绪时 onMainWindowLoad 不注菜单");
+  mb.started = true;
+  sandbox.onMainWindowLoad({ window: { document: early } });
+  ok(early.count() > 0, "就绪后新窗口能正常注入", String(early.count()));
+
   console.log("\n进程调用（Subprocess 签名）");
   const r1 = await sandbox.runProcess("/bin/sh", ["-c", "echo out; echo err 1>&2; exit 3"]);
   eq(r1.code, 3, "拿到真实退出码（wait() 返回 {exitCode}）");
