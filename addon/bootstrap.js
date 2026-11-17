@@ -1,4 +1,17 @@
-/* global Zotero, Services, Cc, Ci */
+/* global Zotero, Services, IOUtils, PathUtils, ChromeUtils, fetch, ChromeWorker */
+
+// ⚠️ 重要：Zotero 7~10 的 bootstrap 沙箱里【没有】Cc / Ci / Components。
+// 加载器（chrome/content/zotero/xpcom/plugins.js 的 _loadScope）只注入：
+//   Zotero, Services, IOUtils, PathUtils, ChromeUtils, Localization, ChromeWorker,
+//   Worker, XMLSerializer, fetch, setTimeout/…, atob/btoa/Blob/crypto/DOMParser/…
+// 以前直接写 Cc["@mozilla.org/process/util;1"] 会抛 ReferenceError: Cc is not defined，
+// 被 catch 吞成「测试失败」这类无信息提示。本文件一律改用等价新 API：
+//   nsIFile       -> Zotero.File.pathToFile() / IOUtils / PathUtils
+//   nsIProcess    -> resource://gre/modules/Subprocess.sys.mjs
+//   nsIFilePicker -> chrome://zotero/content/modules/filePicker.mjs
+//   Services.dirsvc -> PathUtils.homeDir
+var MB_PICK_OPEN = 0;      // FilePicker#modeOpen
+var MB_PICK_FOLDER = 2;    // FilePicker#modeGetFolder
 
 // Mktero 双语阅读快照 — Zotero 7-10 bootstrapped plugin
 // 选中条目 -> 自己选双语 md 文件或论文目录 -> 调用本机转换器
@@ -8,8 +21,197 @@ var MkteroBilingual = {
   id: null,
   version: null,
   rootURI: null,
+  converterDir: null,   // 运行时解析出的转换器目录（jar 包会解压到 profile 下）
   registrations: []
 };
+
+// ---- 平台适配层（替代 Cc / Ci） ----
+
+// 外部进程：Subprocess 是异步的，不阻塞 UI，还能拿到 stdout/stderr
+function getSubprocess() {
+  return ChromeUtils.importESModule("resource://gre/modules/Subprocess.sys.mjs").Subprocess;
+}
+
+// 运行外部命令，返回 { code, stdout, stderr }
+async function runProcess(command, args) {
+  var Subprocess = getSubprocess();
+  var proc;
+  try {
+    proc = await Subprocess.call({
+      command: command,
+      arguments: args || [],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+  } catch (e) {
+    throw new Error("无法启动 " + command + "："
+      + String(e && e.message ? e.message : e));
+  }
+  // 必须并行读管道，否则输出量大时子进程会写满缓冲区卡死
+  var outP = proc.stdout ? proc.stdout.readString() : Promise.resolve("");
+  var errP = proc.stderr ? proc.stderr.readString() : Promise.resolve("");
+  // 注意：Subprocess 的 wait() 解析成 { exitCode } 对象，不是裸数字
+  var done = await proc.wait();
+  var code = (done && typeof done === "object" && "exitCode" in done) ? done.exitCode : done;
+  var out = "";
+  var err = "";
+  try { out = await outP; } catch (e) {}
+  try { err = await errP; } catch (e) {}
+  return { code: code, stdout: out || "", stderr: err || "" };
+}
+
+// 把 jar 内的文件读成文本。插件 id 里带 '@'，jar: URL 直接 fetch/XHR 会被
+// 「userinfo@host」规则解析歪掉；Zotero 的 getResourceAsync 走 nsIChannel，
+// 正是为这种情况准备的（见 Zotero 自己读插件 locale 的代码）。
+async function fetchText(url) {
+  var F = Zotero.File;
+  if (typeof F.getResourceAsync === "function") {
+    try {
+      var t = await F.getResourceAsync(url);
+      if (t) return String(t);
+    } catch (e) {
+      Zotero.logError(e);
+    }
+  }
+  if (typeof F.getResource === "function") {
+    try {
+      var t2 = F.getResource(url);
+      if (t2) return String(t2);
+    } catch (e) {
+      Zotero.logError(e);
+    }
+  }
+  try {
+    var resp = await fetch(url);
+    if (resp && resp.ok) return await resp.text();
+  } catch (e) {
+    Zotero.logError(e);
+  }
+  return String(await Zotero.File.getContentsFromURLAsync(url));
+}
+
+// 插件打包成 .xpi 后 rootURI 是 jar:file:///…!/，里面的 .py 不能直接执行，
+// 必须解压到 profile 下一个稳定目录；开发态（file://）直接用源码目录。
+var CONVERTER_FILES = [
+  "arxiv_to_zotero.py",
+  "arxiv_translate.py",
+  "bilingual_to_zotero.py",
+  "formula_svg.py",
+  "vendor/tex-svg.js"
+];
+
+function converterDirFromRootURI() {
+  try {
+    var uri = MkteroBilingual.rootURI || "";
+    if (uri.indexOf("file:") !== 0) return "";
+    var path = decodeURIComponent(uri.replace(/^file:\/\//, "").replace(/\/$/, ""));
+    var dir = path + "/converter";
+    return Zotero.File.pathToFile(dir).exists() ? dir : "";
+  } catch (e) {
+    Zotero.logError(e);
+    return "";
+  }
+}
+
+async function ensureConverterDir() {
+  // 1) 用户在设置里显式指定的目录最优先
+  var custom = "";
+  try { custom = Zotero.Prefs.get(PREFIX + "converterDir", true) || ""; } catch (e) {}
+  if (custom && Zotero.File.pathToFile(custom).exists()) {
+    MkteroBilingual.converterDir = custom;
+    return custom;
+  }
+  // 2) 开发态：源码目录
+  var src = converterDirFromRootURI();
+  if (src) {
+    MkteroBilingual.converterDir = src;
+    return src;
+  }
+  // 3) 安装态：从 xpi 解压
+  var uri = MkteroBilingual.rootURI || "";
+  if (!uri) return "";
+  var target = PathUtils.join(
+    PathUtils.profileDir,
+    "mktero-bilingual-converter",
+    String(MkteroBilingual.version || "0")
+  );
+  var missing = [];
+  for (var i = 0; i < CONVERTER_FILES.length; i++) {
+    var ok = false;
+    try { ok = await IOUtils.exists(PathUtils.join(target, CONVERTER_FILES[i])); } catch (e) {}
+    if (!ok) missing.push(CONVERTER_FILES[i]);
+  }
+  if (missing.length) {
+    try {
+      await IOUtils.makeDirectory(target, { ignoreExisting: true, createAncestors: true });
+      await IOUtils.makeDirectory(PathUtils.join(target, "vendor"),
+        { ignoreExisting: true, createAncestors: true });
+    } catch (e) {
+      Zotero.logError(e);
+    }
+    for (var j = 0; j < missing.length; j++) {
+      var rel = missing[j];
+      var dest = PathUtils.join(target, rel);
+      try {
+        var text = await fetchText(uri + "converter/" + rel);
+        if (!text) throw new Error("内容为空");
+        await IOUtils.writeUTF8(dest, text, { tmpPath: dest + ".tmp" });
+      } catch (e) {
+        Zotero.logError(e);
+        Zotero.debug("[Mktero Bilingual] 解压失败 " + rel + ": " + e);
+      }
+    }
+  }
+  var main = PathUtils.join(target, "bilingual_to_zotero.py");
+  var exists = false;
+  try { exists = await IOUtils.exists(main); } catch (e) {}
+  MkteroBilingual.converterDir = exists ? target : "";
+  return MkteroBilingual.converterDir;
+}
+
+// ---- OpenAI 兼容接口地址 ----
+// ⚠️ 这里的规则必须和 converter/arxiv_translate.py 的 chat_endpoint() 完全一致，
+// 否则会出现「测试连接成功、翻译却 404」这种最难查的错。
+function apiPathOf(u) {
+  var m = String(u || "").match(/^[a-z]+:\/\/[^/]+(\/.*)?$/i);
+  return m && m[1] ? m[1] : "";
+}
+
+function chatCompletionsUrl(base) {
+  var u = String(base || "").trim().replace(/\/+$/, "");
+  if (!u) return "";
+  // 用户直接贴了完整端点：原样用
+  if (/\/chat\/completions$/i.test(u)) return u;
+  // 以 /v1、/v4 这类版本结尾：补端点
+  if (/\/v\d+$/i.test(u)) return u + "/chat/completions";
+  // 只给了域名（没写路径）才补 /v1；用户明确写了路径就尊重它
+  var p = apiPathOf(u);
+  if (!p || p === "/") return u + "/v1/chat/completions";
+  return u + "/chat/completions";
+}
+
+// 校验 Base URL，返回 { ok, error, loopback }
+function validateApiBase(base) {
+  var raw = String(base || "").trim();
+  if (!raw) return { ok: false, error: "请先填 Base URL" };
+  var u = null;
+  try {
+    u = new URL(raw);
+  } catch (e) {
+    return { ok: false, error: "Base URL 不是合法网址：" + raw };
+  }
+  if (u.username || u.password) {
+    return { ok: false, error: "Base URL 里不要带账号密码" };
+  }
+  if (u.search || u.hash) {
+    return { ok: false, error: "Base URL 不要带 ? 或 # 参数" };
+  }
+  var loop = /^(localhost|127\.0\.0\.1|\[::1\]|::1)$/i.test(u.hostname);
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && loop)) {
+    return { ok: false, error: "Base URL 必须是 https://（本地 localhost 可用 http://）" };
+  }
+  return { ok: true, url: u, loopback: loop };
+}
 
 // preference pane 的 XHTML 在设置窗口作用域里执行，访问不到 bootstrap 的局部变量。
 // 挂到 Zotero 全局，供片段里的 oncommand 调用。
@@ -150,8 +352,11 @@ Zotero.MkteroBilingual = {
     this._set("bs-python", s.advanced.python, ev);
   },
 
+  // 表单没加载出来（_get 返回 fallback）时保留原配置，避免把已有设置清空；
+  // 表单存在时以用户输入为准（包括用户主动清空）。
   collectPrefs: function (existing, ev) {
     var s = existing ? JSON.parse(JSON.stringify(existing)) : MkteroConfig.read();
+    var e = existing || s;
     var num = function (id, def, lo, hi) {
       var v = parseFloat(Zotero.MkteroBilingual._get(id, def, ev));
       if (isNaN(v)) return def;
@@ -159,26 +364,30 @@ Zotero.MkteroBilingual = {
       if (hi !== undefined && v > hi) v = hi;
       return v;
     };
-    s.api.base_url = String(this._get("bs-base-url", "", ev)).trim();
-    s.api.model = String(this._get("bs-model", "", ev)).trim();
+    s.api.base_url = String(this._get("bs-base-url", e.api.base_url || "", ev)).trim();
+    s.api.model = String(this._get("bs-model", e.api.model || "", ev)).trim();
     var key = String(this._get("bs-api-key", "", ev)).trim();
     if (key) s.api.api_key = key;         // 留空保留旧密钥
-    s.api.temperature = num("bs-temperature", 0.2, 0, 2);
-    s.api.timeout = num("bs-timeout", 120, 10, 600);
-    s.translation.target_lang = String(this._get("bs-target-lang", "zh-CN", ev));
-    s.translation.batch = Math.round(num("bs-batch", 8, 1, 30));
-    s.translation.max_chars = Math.round(num("bs-max-chars", 2600, 500, 12000));
-    s.translation.retries = Math.round(num("bs-retries", 3, 1, 10));
-    s.translation.glossary = !!this._get("bs-glossary", true, ev);
-    s.translation.resume = !!this._get("bs-resume", true, ev);
-    s.files.output_dir = String(this._get("bs-output-dir", "", ev)).trim();
-    s.files.attach = !!this._get("bs-attach", true, ev);
-    s.files.open_after = !!this._get("bs-open-after", true, ev);
-    s.files.keep_source = !!this._get("bs-keep-source", false, ev);
-    s.files.keep_cache = !!this._get("bs-keep-cache", false, ev);
-    s.files.keep_blocks = !!this._get("bs-keep-blocks", false, ev);
-    s.advanced.converter_dir = String(this._get("bs-converter-dir", "", ev)).trim();
-    s.advanced.python = String(this._get("bs-python", "", ev)).trim();
+    s.api.temperature = num("bs-temperature", e.api.temperature, 0, 2);
+    s.api.timeout = num("bs-timeout", e.api.timeout, 10, 600);
+    s.translation.target_lang = String(
+      this._get("bs-target-lang", e.translation.target_lang, ev));
+    s.translation.batch = Math.round(num("bs-batch", e.translation.batch, 1, 30));
+    s.translation.max_chars = Math.round(
+      num("bs-max-chars", e.translation.max_chars, 500, 12000));
+    s.translation.retries = Math.round(num("bs-retries", e.translation.retries, 1, 10));
+    s.translation.glossary = !!this._get("bs-glossary", e.translation.glossary, ev);
+    s.translation.resume = !!this._get("bs-resume", e.translation.resume, ev);
+    s.files.output_dir = String(
+      this._get("bs-output-dir", e.files.output_dir || "", ev)).trim();
+    s.files.attach = !!this._get("bs-attach", e.files.attach, ev);
+    s.files.open_after = !!this._get("bs-open-after", e.files.open_after, ev);
+    s.files.keep_source = !!this._get("bs-keep-source", e.files.keep_source, ev);
+    s.files.keep_cache = !!this._get("bs-keep-cache", e.files.keep_cache, ev);
+    s.files.keep_blocks = !!this._get("bs-keep-blocks", e.files.keep_blocks, ev);
+    s.advanced.converter_dir = String(
+      this._get("bs-converter-dir", e.advanced.converter_dir || "", ev)).trim();
+    s.advanced.python = String(this._get("bs-python", e.advanced.python || "", ev)).trim();
     return s;
   },
 
@@ -186,17 +395,16 @@ Zotero.MkteroBilingual = {
     try {
       var old = MkteroConfig.read();
       var s = this.collectPrefs(old, ev);
-      if (!s.api.base_url || !s.api.model) {
-        this._status("Base URL 和模型不能为空", false, ev);
-        return false;
-      }
       MkteroConfig.write(s);
       // 同步转换器/python 到旧 prefs（runPython 等仍在用）
       if (s.advanced.converter_dir) setPref("converterDir", s.advanced.converter_dir);
       if (s.advanced.python) setPref("python", s.advanced.python);
       var d = this._paneDoc(ev);
       if (d) { var k = d.getElementById("bs-api-key"); if (k) k.value = ""; }
-      this._status("已保存（密钥仅存本机）", true, ev);
+      var incomplete = !s.api.base_url || !s.api.model;
+      this._status(incomplete
+        ? "已保存，但 Base URL / 模型还空着，翻译仍不可用"
+        : "已保存（密钥仅存本机）", !incomplete, ev);
       return true;
     } catch (e) {
       this._status("保存失败：" + (e && e.message ? e.message : e), false, ev);
@@ -232,30 +440,100 @@ Zotero.MkteroBilingual = {
     } catch (e) { this._status("重置失败", false, ev); }
   },
 
+  // 纯 JS 直连 API 做一次最小请求：不依赖 python、不依赖转换器目录，
+  // 失败时把 HTTP 状态码和网关返回的原文显示出来，而不是一句「测试失败」。
   testLLM: function (ev) {
     var self = this;
-    this._status("测试中…", undefined, ev);
     if (!this.savePrefs(ev)) return;
-    try {
-      var py = resolvePython();
-      if (!py) { self._status("找不到 python3", false, ev); return; }
-      var converter = getPref("converterDir");
-      var script = converter + "/arxiv_translate.py";
-      if (!Zotero.File.pathToFile(script).exists()) {
-        self._status("找不到 arxiv_translate.py，请检查转换器目录", false, ev); return;
-      }
-      var exe = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
-      exe.initWithPath(py);
-      var proc = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
-      proc.init(exe);
-      var args = [script, "--test-llm", "--config", MkteroConfig.path()];
-      proc.runAsync(args, args.length, {
-        observe: function (subject, topic, data) {
-          if (topic === "process-finished") self._status("连接成功", true, ev);
-          else if (topic === "process-failed") self._status("连接失败，请检查 URL / 模型 / 密钥", false, ev);
+
+    var s;
+    try { s = MkteroConfig.read(); }
+    catch (e) { this._status("读取配置失败：" + (e && e.message ? e.message : e), false, ev); return; }
+
+    var base = String(s.api.base_url || "").trim();
+    var model = String(s.api.model || "").trim();
+    var key = String(s.api.api_key || "").trim();
+
+    var v = validateApiBase(base);          // 先看地址，比模型名更基础
+    if (!v.ok) { this._status(v.error, false, ev); return; }
+    if (!model) { this._status("请先填模型名", false, ev); return; }
+    // 本地/内网服务常常不需要 key，不要因此拦住测试（正式翻译同样放行）
+    if (!key && !v.loopback) {
+      this._status("还没填 API Key（本地或内网免 key 的服务可忽略）", false, ev);
+      return;
+    }
+
+    var url = chatCompletionsUrl(base);
+    var timeout = Math.round(Number(s.api.timeout) || 120);
+    if (!(timeout >= 10)) timeout = 10;
+    if (timeout > 600) timeout = 600;
+
+    // 防止连点叠出一堆并发请求
+    var btn = null;
+    try { var d0 = this._paneDoc(ev); btn = d0 && d0.getElementById("bs-test-btn"); } catch (e) {}
+    if (btn) { if (btn.disabled) return; btn.disabled = true; }
+    this._status("测试中…（" + url + "）", undefined, ev);
+
+    var done = function (text, ok) {
+      if (btn) btn.disabled = false;
+      self._status(text, ok, ev);
+    };
+
+    var headers = { "Content-Type": "application/json" };
+    if (key) headers.Authorization = "Bearer " + key;
+    var body = JSON.stringify({
+      model: model,
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 4,
+      temperature: 0
+    });
+
+    Zotero.HTTP.request("POST", url, {
+      headers: headers,
+      body: body,
+      responseType: "text",
+      timeout: timeout * 1000,
+      successCodes: false     // 非 2xx 也走 then，方便自己判断并显示原因
+    }).then(function (xhr) {
+      var code = xhr.status;
+      var text = "";
+      try { text = String(xhr.responseText || ""); } catch (e) {}
+      var brief = text.replace(/\s+/g, " ").trim();
+      if (brief.length > 240) brief = brief.slice(0, 240) + "…";
+      if (code >= 200 && code < 300) {
+        var parsed = null;
+        try { parsed = JSON.parse(text); } catch (e) {}
+        if (!parsed) {
+          // 2xx 但不是 JSON：多半是被门户/代理的登录页或 HTML 错误页接走了
+          done("HTTP " + code + " 但不是合法 JSON（可能被网关登录页拦截）："
+            + brief, false);
+          return;
         }
-      });
-    } catch (e) { self._status("测试失败", false, ev); Zotero.logError(e); }
+        var reply = "";
+        try {
+          reply = (parsed.choices && parsed.choices[0] && parsed.choices[0].message
+            && parsed.choices[0].message.content) || "";
+        } catch (e) {}
+        done("连接成功：" + model
+          + (reply ? "（返回 " + String(reply).trim().slice(0, 20) + "）" : " 返回正常"),
+          true);
+        return;
+      }
+      var hint = "";
+      if (code === 401 || code === 403) hint = "，密钥无效或没有该模型的权限";
+      else if (code === 404) hint = "，接口路径或模型名不对（当前请求 " + url + "）";
+      else if (code === 429) hint = "，触发限流，稍后再试";
+      else if (code >= 500) hint = "，网关或上游模型出错";
+      done("HTTP " + code + hint + (brief ? "：" + brief : ""), false);
+    }, function (err) {
+      var msg = String(err && err.message ? err.message : err);
+      if (/timeout|timed out/i.test(msg)) {
+        msg = "超时（" + timeout + " 秒内没响应）";
+      } else if (/NetworkError|Network Error|nsresult/i.test(msg)) {
+        msg = "网络不可达，检查 Base URL 是否能访问（代理 / 内网网关）";
+      }
+      done("请求失败：" + msg, false);
+    });
   }
 };
 
@@ -273,9 +551,11 @@ var MkteroConfig = {
 
   path: function () {
     try {
-      return Services.dirsvc.get("Home", Ci.nsIFile).path.replace(/\/$/, "") +
-             "/.mktero_llm_config.json";
-    } catch (e) { return ""; }
+      return PathUtils.join(PathUtils.homeDir, ".mktero_llm_config.json");
+    } catch (e) {
+      Zotero.logError(e);
+      return "";
+    }
   },
 
   read: function () {
@@ -314,6 +594,10 @@ var MkteroConfig = {
     out.model = s.api.model;
     if (s.api.api_key) out.api_key = s.api.api_key;
     Zotero.File.putContents(p, JSON.stringify(out, null, 2));
+    // 密钥文件收紧到 600（异步执行，失败不影响保存结果）
+    try {
+      IOUtils.setPermissions(p, 0o600).catch(function () {});
+    } catch (e) {}
     return p;
   }
 };
@@ -326,19 +610,13 @@ var DEFAULTS = {
   lastDir: ""
 };
 
-// 插件自带的转换器目录（打进 xpi 的 converter/ 子目录）
+// 插件自带的转换器目录：安装态由 ensureConverterDir() 从 xpi 解压到 profile，
+// 开发态直接用源码目录。缓存结果，避免每次 getPref 都去碰磁盘。
 function builtinConverterDir() {
-  try {
-    var uri = MkteroBilingual.rootURI;
-    if (!uri) return "";
-    // rootURI 形如 file:///path/to/addon/ —— 转成系统路径
-    var path = decodeURIComponent(uri.replace(/^file:\/\//, "").replace(/\/$/, ""));
-    var dir = path + "/converter";
-    return Zotero.File.pathToFile(dir).exists() ? dir : "";
-  } catch (e) {
-    Zotero.logError(e);
-    return "";
-  }
+  if (MkteroBilingual.converterDir !== null) return MkteroBilingual.converterDir;
+  var dir = converterDirFromRootURI();
+  MkteroBilingual.converterDir = dir;
+  return dir;
 }
 
 function getPref(name) {
@@ -512,6 +790,15 @@ async function startup({ id, version, rootURI }, reason) {
   MkteroBilingual.rootURI = rootURI;
   await Zotero.initializationPromise;
 
+  // 装上 .xpi 时 rootURI 是 jar:file:///…!/，里面的 .py 不能直接执行，
+  // 这里先解压到 profile/mktero-bilingual-converter/<version>/ 再跑。
+  try {
+    await ensureConverterDir();
+    Zotero.debug("[Mktero Bilingual] converter dir = " + MkteroBilingual.converterDir);
+  } catch (e) {
+    Zotero.logError(e);
+  }
+
   // 设置侧栏项：极简纯 XUL 片段（无 XML 声明、无 html: 前缀、无内嵌 style 标签、
   // 不加载 scripts / stylesheets），避开之前踩过的解析与沙箱坑。
   // 片段里只有一个按钮，点击后调用 Zotero.MkteroBilingual.openSettings()
@@ -562,13 +849,14 @@ function shutdown({ id, version, rootURI }, reason) {
 
 function uninstall(data, reason) {}
 
-function firstMarkdown(dir) {
+// 目录里第一个 .md（用 IOUtils 列目录，不需要 Ci.nsIFile）
+async function firstMarkdown(dirPath) {
   try {
-    var entries = dir.directoryEntries;
-    while (entries.hasMoreElements()) {
-      var f = entries.getNext().QueryInterface(Ci.nsIFile);
-      if (f.isFile() && /\.md$/i.test(f.leafName)) {
-        return f.path;
+    var names = await IOUtils.getChildren(dirPath);
+    for (var i = 0; i < names.length; i++) {
+      if (/\.md$/i.test(names[i])) {
+        var st = await IOUtils.stat(names[i]);
+        if (st.type === "regular") return names[i];
       }
     }
   } catch (e) {
@@ -579,7 +867,7 @@ function firstMarkdown(dir) {
 
 // 文件选择器不可用/被取消时，退回「粘贴路径」，保证流程不会静默中断
 function promptPath(win, title, mode) {
-  var hint = (mode === Ci.nsIFilePicker.modeGetFolder)
+  var hint = (mode === MB_PICK_FOLDER)
     ? "粘贴「论文目录」的绝对路径（Finder 里选中文件夹按 ⌥⌘C 复制路径）。\n留空则放弃："
     : "粘贴双语 .md 文件的绝对路径（Finder 里选中文件按 ⌥⌘C 复制路径）。\n留空则放弃：";
   var obj = { value: "" };
@@ -593,12 +881,21 @@ function promptPath(win, title, mode) {
 // 每次由用户自己选，记住上次所在目录方便下次定位，不预设任何 inbox
 function pickPath(win, title, mode) {
   return new Promise(function (resolve) {
+    var FilePicker;
     try {
-      var fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
-      // Firefox 140 需要 browsingContext；传 window 会抛异常并被静默吞掉
-      var parent = win.browsingContext || win;
-      fp.init(parent, title, mode);
-      if (mode === Ci.nsIFilePicker.modeOpen) {
+      // 用 Zotero 自己的 FilePicker 包装（内部持有 nsIFilePicker），
+      // 插件沙箱里拿不到 Ci，直接用会抛 ReferenceError。
+      FilePicker = ChromeUtils.importESModule(
+        "chrome://zotero/content/modules/filePicker.mjs").FilePicker;
+    } catch (e) {
+      Zotero.logError(e);
+      resolve(null);
+      return;
+    }
+    try {
+      var fp = new FilePicker();
+      fp.init(win, title, mode);
+      if (mode === MB_PICK_OPEN) {
         fp.appendFilter("Markdown", "*.md");
       }
       var last = getPref("lastDir");
@@ -606,27 +903,30 @@ function pickPath(win, title, mode) {
         try {
           var d = Zotero.File.pathToFile(last);
           if (d.exists() && d.isDirectory()) {
-            fp.displayDirectory = d;
+            fp.displayDirectory = last;   // 新版接口要字符串路径
           }
         } catch (e) {
           Zotero.logError(e);
         }
       }
-      fp.open(function (rv) {
-        if (rv !== Ci.nsIFilePicker.returnOK) {
+      fp.show().then(function (rv) {
+        if (rv !== fp.returnOK) {
           resolve(null);
           return;
         }
-        var p = fp.file.path;
+        var p = fp.file;   // 已经是路径字符串
         try {
-          var dir = (mode === Ci.nsIFilePicker.modeGetFolder)
+          var dir = (mode === MB_PICK_FOLDER)
             ? p
             : Zotero.File.pathToFile(p).parent.path;
           setPref("lastDir", dir);
         } catch (e) {
           Zotero.logError(e);
         }
-        resolve(p);
+        resolve(p || null);
+      }, function (e) {
+        Zotero.logError(e);
+        resolve(null);
       });
     } catch (e) {
       Zotero.logError(e);
@@ -672,76 +972,42 @@ async function runPython(mdPath, outDir, name) {
       Zotero.logError(e2);
     }
   }
-  return new Promise(function (resolve, reject) {
-    try {
-      var py = resolvePython();
-      if (!py) {
-        reject(new Error("找不到 python3，请在「双语快照：设置路径…」里指定"));
-        return;
-      }
-      var scriptPath = getPref("converterDir") + "/bilingual_to_zotero.py";
-      var script = Zotero.File.pathToFile(scriptPath);
-      if (!script.exists()) {
-        reject(new Error("找不到转换器：" + scriptPath));
-        return;
-      }
-      var exe = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
-      exe.initWithPath(py);
-      if (!exe.exists()) {
-        reject(new Error("找不到 python3：" + py));
-        return;
-      }
-      var proc = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
-      proc.init(exe);
-      var args = [
-        script.path, "--md", mdPath, "--out", outDir,
-        "--name-file", nameFile, "--no-pdf"
-      ];
-      proc.runAsync(args, args.length, {
-        observe: function (subject, topic, data) {
-          if (topic === "process-finished") {
-            resolve();
-          } else if (topic === "process-failed") {
-            reject(new Error("转换进程退出异常"));
-          }
-        }
-      });
-    } catch (e) {
-      reject(e);
-    }
-  });
+  var py = resolvePython();
+  if (!py) throw new Error("找不到 python3，请在设置「高级」里指定可执行文件路径");
+  var converterDir = getPref("converterDir");
+  var scriptPath = converterDir + "/bilingual_to_zotero.py";
+  if (!Zotero.File.pathToFile(scriptPath).exists()) {
+    throw new Error("找不到转换器：" + scriptPath
+      + "\n如果插件是从 .xpi 安装的，转换器应已解压到 profile 目录；"
+      + "也可以到设置「高级」里手动指定转换器目录。");
+  }
+  var res = await runProcess(py, [
+    scriptPath, "--md", mdPath, "--out", outDir,
+    "--name-file", nameFile, "--no-pdf"
+  ]);
+  if (res.code !== 0) {
+    var tail = tailText(res.stderr || res.stdout, 400);
+    throw new Error("转换器退出码 " + res.code + (tail ? "：\n" + tail : ""));
+  }
 }
 
-// 通用：异步跑一个 python 脚本，返回退出码（0=成功）
-function runScript(args) {
-  return new Promise(function (resolve, reject) {
-    try {
-      var py = resolvePython();
-      if (!py) {
-        reject(new Error("找不到 python3，请在「双语快照：设置路径…」里指定"));
-        return;
-      }
-      var exe = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
-      exe.initWithPath(py);
-      if (!exe.exists()) {
-        reject(new Error("找不到 python3：" + py));
-        return;
-      }
-      var proc = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
-      proc.init(exe);
-      proc.runAsync(args, args.length, {
-        observe: function (subject, topic, data) {
-          if (topic === "process-finished") {
-            resolve(0);
-          } else if (topic === "process-failed") {
-            reject(new Error("进程退出异常：" + args[0]));
-          }
-        }
-      });
-    } catch (e) {
-      reject(e);
-    }
-  });
+// 取日志末尾若干字符，报错时给用户看最关键的那几行
+function tailText(s, n) {
+  var t = String(s || "").trim();
+  if (!t) return "";
+  return t.length > n ? "…" + t.slice(t.length - n) : t;
+}
+
+// 通用：异步跑一个外部脚本，args[0] 是可执行文件（通常是 python3），其余是参数
+async function runScript(args) {
+  var py = String(args[0] || "").trim() || resolvePython();
+  if (!py) throw new Error("找不到 python3，请在设置「高级」里指定可执行文件路径");
+  var res = await runProcess(py, args.slice(1));
+  if (res.code !== 0) {
+    var tail = tailText(res.stderr || res.stdout, 600);
+    throw new Error("脚本执行失败（退出码 " + res.code + "）" + (tail ? "：\n" + tail : ""));
+  }
+  return res;
 }
 
 // 从 Zotero 条目的 URL / Extra / DOI 里提取 arXiv ID
@@ -806,10 +1072,10 @@ async function runArxiv(win) {
   } else {
     outDir = await pickPath(
       win, "选择 arXiv 双语快照的输出目录（源码/译文/HTML 存这里）",
-      Ci.nsIFilePicker.modeGetFolder
+      MB_PICK_FOLDER
     );
     if (!outDir) {
-      outDir = promptPath(win, "arXiv 输出目录", Ci.nsIFilePicker.modeGetFolder);
+      outDir = promptPath(win, "arXiv 输出目录", MB_PICK_FOLDER);
     }
   }
   if (!outDir) return;
@@ -853,8 +1119,7 @@ async function runArxiv(win) {
     // 显式传 LLM 配置路径，避免插件进程 HOME 不同导致读不到密钥
     var llmCfg = "";
     try {
-      llmCfg = Services.dirsvc.get("Home", Ci.nsIFile).path +
-               "/.mktero_llm_config.json";
+      llmCfg = MkteroConfig.path();
     } catch (e) {}
     var transArgs = [py, transScript, "--blocks", blocksPath,
                      "--out", zhPath, "--title", item.getField("title") || ""];
@@ -884,7 +1149,7 @@ async function runArxiv(win) {
       html = "";
     }
     if (!html || !Zotero.File.pathToFile(html).exists()) {
-      html = findHtml(outDir);
+      html = await findHtml(outDir);
     }
     if (!html) {
       throw new Error("未找到生成的 HTML，输出目录：" + outDir);
@@ -943,35 +1208,33 @@ async function runArxiv(win) {
   }
 }
 
-// 兜底：结果清单读不到时，扫描输出目录里最新的 HTML
-function findHtml(outDir) {
+// 兜底：结果清单读不到时，扫描输出目录里最新的 HTML（IOUtils，无需 Ci）
+async function findHtml(outDir) {
   try {
-    var dir = Zotero.File.pathToFile(outDir);
-    if (!dir.exists()) {
-      return null;
-    }
-    var best = null;
-    var bestTime = -1;
-    var entries = dir.directoryEntries;
-    while (entries.hasMoreElements()) {
-      var f = entries.getNext().QueryInterface(Ci.nsIFile);
-      if (!f.isFile() || !/\.html$/i.test(f.leafName)) {
-        continue;
-      }
-      if (/\.stage\.html$/i.test(f.leafName) || f.leafName.indexOf("_formula_") === 0) {
-        continue;
-      }
-      var t = f.lastModifiedTime;
-      if (t > bestTime) {
-        bestTime = t;
-        best = f.path;
-      }
-    }
-    return best;
+    var kids = await IOUtils.getChildren(outDir);
   } catch (e) {
     Zotero.logError(e);
     return null;
   }
+  var best = null;
+  var bestTime = -1;
+  for (var i = 0; i < kids.length; i++) {
+    var full = kids[i];
+    var leaf = full.replace(/^.*[\\/]/, "");
+    if (!/\.html$/i.test(leaf)) continue;
+    if (/\.stage\.html$/i.test(leaf) || leaf.indexOf("_formula_") === 0) continue;
+    try {
+      var st = await IOUtils.stat(full);
+      if (st.type !== "regular") continue;
+      if (st.lastModified > bestTime) {
+        bestTime = st.lastModified;
+        best = full;
+      }
+    } catch (e) {
+      Zotero.logError(e);
+    }
+  }
+  return best;
 }
 
 function progress(text) {
@@ -1013,15 +1276,15 @@ async function run(win, mode) {
     var dirPath = await pickPath(
       win,
       "选择 Mktero 导出的论文目录（含 md 与 assets）",
-      Ci.nsIFilePicker.modeGetFolder
+      MB_PICK_FOLDER
     );
     if (!dirPath) {
-      dirPath = promptPath(win, "选择论文目录", Ci.nsIFilePicker.modeGetFolder);
+      dirPath = promptPath(win, "选择论文目录", MB_PICK_FOLDER);
     }
     if (!dirPath) {
       return;
     }
-    mdPath = firstMarkdown(Zotero.File.pathToFile(dirPath));
+    mdPath = await firstMarkdown(dirPath);
     if (!mdPath) {
       alertWin(win, "双语阅读快照", "这个目录里没有找到 .md 文件，请重新选择。");
       return;
@@ -1030,10 +1293,10 @@ async function run(win, mode) {
     mdPath = await pickPath(
       win,
       "选择 Mktero 导出的双语 Markdown（*.md）",
-      Ci.nsIFilePicker.modeOpen
+      MB_PICK_OPEN
     );
     if (!mdPath) {
-      mdPath = promptPath(win, "选择双语 md", Ci.nsIFilePicker.modeOpen);
+      mdPath = promptPath(win, "选择双语 md", MB_PICK_OPEN);
     }
     if (!mdPath) {
       return;
@@ -1083,7 +1346,7 @@ async function run(win, mode) {
       }
     }
     if (!html || !Zotero.File.pathToFile(html).exists()) {
-      html = findHtml(outDir);
+      html = await findHtml(outDir);
     }
     if (!html) {
       throw new Error("转换完成但没找到 HTML。输出目录：" + outDir
@@ -1144,8 +1407,9 @@ async function selfCheck(win) {
     var items = Zotero.getActiveZoteroPane().getSelectedItems() || [];
     return items.length + (items.length ? " / " + (items[0].isRegularItem() ? "常规" : "非常规") : "");
   });
-  probe("python", function () { return resolvePython(); });
-  probe("转换器目录", function () { return getPref("converterDir"); });
+  probe("python", function () { return resolvePython() || "未找到"; });
+  probe("rootURI", function () { return MkteroBilingual.rootURI; });
+  probe("转换器目录", function () { return getPref("converterDir") || "未解析（见下方各项）"; });
   probe("主脚本存在", function () {
     return Zotero.File.pathToFile(getPref("converterDir") + "/bilingual_to_zotero.py").exists();
   });
@@ -1161,7 +1425,7 @@ async function selfCheck(win) {
   probe("arXiv 翻译脚本", function () {
     return Zotero.File.pathToFile(getPref("converterDir") + "/arxiv_translate.py").exists();
   });
-  probe("filePicker.modeGetFolder", function () { return Ci.nsIFilePicker.modeGetFolder; });
+  probe("filePicker.modeGetFolder", function () { return MB_PICK_FOLDER; });
   alertWin(win, "双语快照自检", lines.join("\n"));
   return lines.join("\n");
 }

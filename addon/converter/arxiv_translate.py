@@ -24,10 +24,43 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 CONFIG = Path.home() / ".mktero_llm_config.json"
+
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+# 本地/内网服务常常不校验 key；与 bootstrap.js 一致地放行一个占位
+LOCAL_PLACEHOLDER_KEY = "sk-local"
+
+
+def chat_endpoint(base):
+    """把用户填的 Base URL 归一成完整的 chat/completions 地址。
+
+    ⚠️ 规则必须和 addon/bootstrap.js 的 chatCompletionsUrl() 完全一致，
+    否则会出现「设置里测试连接成功、翻译却 404」这种最难查的错。
+    """
+    u = str(base or "").strip().rstrip("/")
+    if not u:
+        return ""
+    if re.search(r"/chat/completions$", u, re.I):
+        return u
+    if re.search(r"/v\d+$", u, re.I):
+        return u + "/chat/completions"
+    path = urllib.parse.urlsplit(u).path
+    if path in ("", "/"):
+        return u + "/v1/chat/completions"
+    return u + "/chat/completions"
+
+
+def is_loopback(base):
+    try:
+        host = urllib.parse.urlsplit(str(base or "")).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() in LOOPBACK_HOSTS
 
 LANG_NAMES = {
     "zh-CN": "简体中文", "zh-TW": "繁体中文",
@@ -109,9 +142,14 @@ def load_config(cli):
     base = cli.base_url or api["base_url"]
     model = cli.model or api["model"]
     key = cli.api_key or api["api_key"]
-    if not (base and model and key):
-        sys.exit("缺少 base_url / model / api_key：请在设置面板配置，或用命令行参数")
-    return base.rstrip("/"), model, key, s
+    if not (base and model):
+        sys.exit("缺少 base_url / model：请在设置面板配置，或用命令行参数")
+    if not key:
+        if is_loopback(base):
+            key = LOCAL_PLACEHOLDER_KEY
+        else:
+            sys.exit("缺少 api_key：请在设置面板配置，或用命令行参数")
+    return str(base).strip().rstrip("/"), model, key, s
 
 
 def call_llm(base, model, key, text, attempts=3, settings=None):
@@ -130,7 +168,7 @@ def call_llm(base, model, key, text, attempts=3, settings=None):
         "stream": False,
     }
     req = urllib.request.Request(
-        base + "/chat/completions",
+        chat_endpoint(base),
         data=json.dumps(payload).encode("utf-8"),
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json"},
@@ -210,14 +248,20 @@ def main():
             reply, usage = call_llm(base, model, key,
                                     "【b999】Reply with a single word: OK",
                                     settings=settings)
-            if "OK" in reply.upper():
-                print("连接成功：模型 %s 返回正常（tokens=%d）"
-                      % (model, usage.get("total_tokens", 0)))
+            # 只要模型有正常回复就算通过，不强求回复里带 OK
+            text = (reply or "").strip()
+            if text:
+                print("连接成功：%s → %s（tokens=%d）"
+                      % (chat_endpoint(base), model,
+                         usage.get("total_tokens", 0)))
+                print("         返回：%s" % text[:60])
                 return
-            print("连接异常：返回内容不符合预期", file=sys.stderr)
+            print("连接异常：模型返回了空内容（%s）" % chat_endpoint(base),
+                  file=sys.stderr)
             sys.exit(2)
         except Exception as e:
-            print("连接失败：%s" % str(e)[:200], file=sys.stderr)
+            print("连接失败：%s\n        请求地址：%s"
+                  % (str(e)[:300], chat_endpoint(base)), file=sys.stderr)
             sys.exit(1)
 
     if not a.blocks or not a.out:

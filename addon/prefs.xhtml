@@ -52,7 +52,8 @@
       </html:div>
     </html:div>
     <html:div class="bs-actions">
-      <html:button type="button" class="bs-button" onclick="Zotero.MkteroBilingual.testLLM(event);">测试连接</html:button>
+      <html:button type="button" class="bs-button" id="bs-test-btn"
+                   onclick="Zotero.MkteroBilingual.testLLM(event);">测试连接</html:button>
       <html:span class="bs-status" id="bs-status"></html:span>
     </html:div>
     <html:small class="bs-note">密钥写在 ~/.mktero_llm_config.json（权限 600），不进插件包、日志或 Zotero 同步数据。</html:small>

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.2
+
+修复「设置能打开、但点测试连接只显示一句『测试失败』」——根因是插件沙箱里根本没有 `Cc` / `Ci`：
+
+- Zotero 7+ 的 bootstrap 沙箱只注入 `Zotero / Services / IOUtils / PathUtils / ChromeUtils / fetch`，不注入 `Cc` / `Ci` / `Components`。旧代码里 `Cc["@mozilla.org/process/util;1"]`、`Ci.nsIFilePicker.*` 全部抛 `ReferenceError`，被 `catch` 吞成「测试失败」。现已全部改用等价新 API：Subprocess（进程）、`chrome://zotero/content/modules/filePicker.mjs`（选择器）、`IOUtils` / `PathUtils`（文件与目录）
+- 「测试连接」改为纯 JS 直连 API，不再依赖 python 和转换器：成功显示模型返回，失败显示 HTTP 状态码 + 网关原文（401/403 提示密钥、404 提示路径或模型名、超时与网络不可达分别提示）
+- 从 .xpi 安装时 `rootURI` 是 `jar:file://…!/`，里面的 `.py` 无法直接执行。现在启动时会把转换器解压到 `<profile>/mktero-bilingual-converter/<版本>/`（含 `vendor/tex-svg.js`），并在自检里显示实际目录
+- 转换失败时把脚本的 stderr 末段一起弹出来，不再是「进程退出异常」
+- 文件选择器改用 Zotero 的 FilePicker 封装；目录扫描改用 IOUtils（不再 `QueryInterface(Ci.nsIFile)`）
+- 设置里字段读不到时不再把已有 Base URL / 模型清空；Base URL 与模型为空时仍允许保存其他项，只提示翻译不可用
+- 新增 `scripts/sandbox_check.js`：在「只给沙箱该给的全局」的环境里跑 bootstrap.js，本地即可复现这类 ReferenceError
+- 参考 Mktero 的 AI 配置层补齐几处：
+  - Base URL 归一化规则统一到 JS 与 Python 两侧（`chatCompletionsUrl()` / `chat_endpoint()`），11 种写法逐一交叉验证一致，杜绝「测试连接成功、翻译却 404」
+  - 填完整端点、只填域名、写成 `/v4` 这类版本路径都能正确拼出 `/chat/completions`；用户明确写了路径时不再擅自塞 `/v1`
+  - Base URL 校验：非法网址、http:// （本地 localhost 除外）、带 `?`/`#`、带账号密码都在测试前直接指出
+  - 本地/内网服务（localhost / 127.0.0.1 / ::1）没填 Key 时放行：JS 不发 Authorization 头，Python 用占位 key
+  - 2xx 但响应不是 JSON 时单独提示「可能被网关登录页拦截」，不再当成成功
+  - 测试期间禁用按钮，避免连点叠出并发请求；CLI `--test-llm` 不再强求回复里带 OK，并打印实际请求地址
+
 ## 0.5.1
 
 - 合并设置界面：删除独立设置窗口，工具菜单/右键的「设置」改为调用 Zotero.Utilities.Internal.openPreferences(paneID) 直接定位到设置侧栏 pane，两个入口指向同一个界面，不再出现一个能填一个空白

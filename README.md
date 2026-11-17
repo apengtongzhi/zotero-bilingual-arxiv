@@ -62,7 +62,8 @@ python3 scripts/build.py          # 生成 dist/bilingual-snapshot.xpi 与 dist/
 ```
 addon/                  # 插件源码
   bootstrap.js          # 生命周期、菜单、设置面板注册、挂附件
-  prefs.xhtml/pane.js   # 可视化设置面板
+  prefs.xhtml           # 设置面板（偏好设置侧栏里的 XUL 片段）
+  settings.css          # 面板样式（跟随 Zotero 深浅色）
   manifest.json         # 插件 ID、版本、兼容范围、update_url
   converter/            # Python 转换器（随 xpi 一起安装）
     bilingual_to_zotero.py   # md/文件夹入口
@@ -71,6 +72,7 @@ addon/                  # 插件源码
     formula_svg.py           # MathJax 公式预渲染
     vendor/tex-svg.js        # 离线 MathJax
 scripts/build.py        # 打包 + 生成 update.json
+scripts/sandbox_check.js # 在「只给沙箱该给的全局」的环境里跑 bootstrap.js
 .github/workflows/release.yml  # tag 自动发布
 ```
 
@@ -84,6 +86,29 @@ git tag v0.4.1
 git push origin main --tags
 # GitHub Actions 自动打包、发 release、更新 update.json
 ```
+
+## 排错
+
+设置面板里的「测试连接」现在会直接告出原因，而不是一句「测试失败」：
+
+| 提示 | 含义与处理 |
+| --- | --- |
+| `HTTP 401` / `HTTP 403`，密钥无效 | API Key 不对，或该 key 没有这个模型的权限 |
+| `HTTP 404`，接口路径或模型名不对 | 提示里会带上实际请求的 URL；检查 Base URL 是否需要 `/v1`、模型名是否拼对 |
+| `超时（N 秒内没响应）` | 网关慢或不可达；调大「请求超时」，或确认内网/VPN 是否连通 |
+| `网络不可达` | Base URL 主机访问不到（代理、防火墙、内网限制） |
+| `找不到转换器：…` | 从「高级」里手动指定转换器目录，或重装插件让它重新解压 |
+| `找不到 python3` | 在「高级」里填 `python3` 的绝对路径（`which python3`） |
+
+转换失败时弹窗会带出脚本 stderr 的最后几行，通常已足够定位（缺 python 包、Chrome 找不到、arXiv 下载失败等）。
+
+插件沙箱里**没有** `Cc` / `Ci`。如果你要改 `bootstrap.js`，改完先跑一遍：
+
+```bash
+node scripts/sandbox_check.js
+```
+
+它会在只暴露 `Zotero / Services / IOUtils / PathUtils / ChromeUtils / fetch` 的假沙箱里执行整个 `bootstrap.js`，能提前抓到 `Cc is not defined` 这类只在 Zotero 里才炸的问题。
 
 ## 许可
 
