@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify manifest version matches tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(python3 -c "import json;print(json.load(open('addon/manifest.json'))['version'])")
+          echo "tag=$TAG manifest=$VERSION"
+          test "$TAG" = "$VERSION" || { echo "版本不一致"; exit 1; }
+
+      - name: Check for secrets in tracked files
+        run: |
+          if grep -rIn --exclude-dir=.git --exclude='*.md' -E 'sk-[A-Za-z0-9]{16,}' .; then
+            echo "发现疑似 API 密钥，拒绝发布"; exit 1
+          fi
+
+      - name: Build XPI and update.json
+        run: |
+          REPO="${GITHUB_REPOSITORY}"
+          BASE="https://github.com/${REPO}/releases/download/release"
+          python3 scripts/build.py --release-url "$BASE"
+
+      - name: Create version release with XPI
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: dist/bilingual-snapshot.xpi
+          generate_release_notes: true
+
+      - name: Publish update.json on long-lived 'release' tag
+        run: |
+          gh release view release >/dev/null 2>&1 || \
+            gh release create release --title "update manifest" --notes "xpi 自动更新清单" --target main
+          gh release upload release dist/update.json --clobber
+          echo "自动更新地址：https://github.com/${GITHUB_REPOSITORY}/releases/download/release/update.json"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

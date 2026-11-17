@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Bilingual Snapshot (Mktero & arXiv)",
+  "version": "0.4.0",
+  "description": "Convert Mktero bilingual Markdown or arXiv LaTeX source into styled, self-contained bilingual HTML snapshots attached to Zotero items.",
+  "author": "apengtongzhi",
+  "icons": {
+    "48": "icon.svg",
+    "96": "icon.svg"
+  },
+  "applications": {
+    "zotero": {
+      "id": "bilingual-snapshot@apengtongzhi.github.io",
+      "update_url": "https://github.com/apengtongzhi/zotero-bilingual-arxiv/releases/download/release/update.json",
+      "strict_min_version": "7.0",
+      "strict_max_version": "11.*.*"
+    }
+  },
+  "homepage_url": "https://github.com/apengtongzhi/zotero-bilingual-arxiv"
+}

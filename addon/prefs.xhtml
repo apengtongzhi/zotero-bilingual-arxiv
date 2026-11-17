@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      id="mktero-prefpane"
+      class="mktero-prefpane">
+
+  <html:style>
+    .mktero-prefpane h2 { font: 600 1.15rem system-ui,sans-serif; margin: 0 0 .3rem; }
+    .mktero-prefpane .mktero-desc { color: #666; font-size: .88rem; margin: 0 0 1.1rem; line-height:1.6; }
+    .mktero-group { margin: 0 0 1.5rem; }
+    .mktero-group > label.mktero-h { font-weight:600; font-size:1rem;
+      display:block; margin:0 0 .55rem; }
+    .mktero-row { display:flex; align-items:center; gap:.6rem; margin:.35rem 0; }
+    .mktero-row label { min-width:8.5rem; }
+    .mktero-row html:input { flex:1; }
+    .mktero-hint { color:#777; font-size:.82rem; margin:.25rem 0 .6rem 8.9rem; }
+    .mktero-status { font-size:.86rem; margin:.5rem 0 0 8.9rem; min-height:1.2em; }
+    .mktero-status.ok { color:#1a7f37; }
+    .mktero-status.err { color:#c0392b; }
+  </html:style>
+
+  <html:h2>双语阅读快照 / arXiv LaTeX 翻译</html:h2>
+  <html:p class="mktero-desc">
+    把 Mktero 导出的双语 Markdown，或 arXiv 论文的 LaTeX 源码，转成自包含双语 HTML 快照挂回 Zotero。
+    三种入口共用同一套排版与设置。
+  </html:p>
+
+  <vbox class="mktero-group">
+    <label class="mktero-h">LLM 翻译接口（可替换为任意 OpenAI 兼容服务）</label>
+    <hbox class="mktero-row" align="center">
+      <label value="Base URL" control="mktero-base-url"/>
+      <html:input id="mktero-base-url" type="text" placeholder="https://api.example.com/v1"/>
+    </hbox>
+    <hbox class="mktero-row" align="center">
+      <label value="模型" control="mktero-model"/>
+      <html:input id="mktero-model" type="text" placeholder="deepseek-v4-flash"/>
+    </hbox>
+    <hbox class="mktero-row" align="center">
+      <label value="API Key" control="mktero-api-key"/>
+      <html:input id="mktero-api-key" type="password" placeholder="sk-...（留空表示不修改）"/>
+      <button id="mktero-toggle-key" label="显示"/>
+    </hbox>
+    <html:p class="mktero-hint">
+      密钥只保存在本机 ~/.mktero_llm_config.json（权限 600），不写入插件、日志或工作区。留空则沿用已保存的密钥。
+    </html:p>
+    <hbox align="center">
+      <button id="mktero-save" label="保存 API 配置"/>
+      <button id="mktero-test-llm" label="测试连接"/>
+      <label id="mktero-llm-status" class="mktero-status" value=""/>
+    </hbox>
+  </vbox>
+
+  <vbox class="mktero-group">
+    <label class="mktero-h">转换器与运行环境</label>
+    <hbox class="mktero-row" align="center">
+      <label value="转换器目录" control="mktero-converter-dir"/>
+      <html:input id="mktero-converter-dir" type="text"
+                  preference="extensions.mkterobilang.converterDir"/>
+    </hbox>
+    <hbox class="mktero-row" align="center">
+      <label value="python3 路径" control="mktero-python"/>
+      <html:input id="mktero-python" type="text"
+                  preference="extensions.mkterobilang.python"/>
+    </hbox>
+    <html:p class="mktero-hint">
+      转换器目录需含 arxiv_to_zotero.py、arxiv_translate.py、bilingual_to_zotero.py、formula_svg.py 与 vendor/tex-svg.js。
+    </html:p>
+  </vbox>
+
+  <vbox class="mktero-group">
+    <label class="mktero-h">使用入口</label>
+    <html:p class="mktero-hint" style="margin-left:0">
+      右键文献条目 → 「生成双语阅读快照（选 md 文件 / 选论文目录）」或「从 arXiv 生成双语快照」。
+      arXiv 入口会自动从条目的 URL / Extra / DOI 提取 ID，找不到会弹框让你填。
+    </html:p>
+  </vbox>
+
+</vbox>
