@@ -742,6 +742,23 @@ function makeMenuDoc() {
   await new Promise(r => setTimeout(r, 50));
   ok(btn.disabled === false, "结束后按钮恢复");
 
+  console.log("\nLaTeX 清洗：标题作者不进正文 / bbl 参考文献");
+  const { spawnSync } = require("child_process");
+  const probe = spawnSync(process.env.MB_PY || "python3",
+    [path.join(__dirname, "fixtures", "latex_probe.py")], { encoding: "utf8" });
+  if (probe.status === 0 && probe.stdout.trim()) {
+    const r = JSON.parse(probe.stdout.trim());
+    eq(r.clean, true, "\\title / \\author / \\bibliography 不残留到正文");
+    eq(r.has_section, true, "章节命令保留");
+    eq(r.has_body, true, "正文内容保留");
+    eq(r.bbl_order.length, 2, "bbl 解析出 2 条文献");
+    ok(/Pokhrel/.test(r.bbl_first) && /2022/.test(r.bbl_first),
+       "文献条目有作者与年份，不再是 bibtex key", r.bbl_first);
+    ok(!/\\emph|\\bibitem/.test(r.bbl_first), "LaTeX 命令已清掉");
+  } else {
+    ok(false, "python 探针可运行", String(probe.stderr || "").slice(0, 200));
+  }
+
   console.log("\njar 安装态：转换器解压");
   const mb = sandbox.MkteroBilingual;
   mb.rootURI = "jar:file:///tmp/fake-plugin.xpi!/";

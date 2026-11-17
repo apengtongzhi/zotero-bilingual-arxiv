@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.3
+
+按一份真实产物（IEEEtran 的 arXiv 2502.13838）逐条修排版与参考文献：
+
+- **标题/作者/致谢被当成正文第一段**：`document_body()` 以前只截取
+  `\begin{document}…\end{document}`，没删 `\title{}` / `\author{}` / `\thanks{}`，
+  于是首页整块连同基金号、邮箱一起出现在正文里。现在用支持嵌套括号的
+  `drop_braced_commands()` 整段剥掉（页头仍由 `extract_metadata()` 正常生成）
+- **`reference` / `IEEEtran` 之类的命令残留在文末**：`\bibliographystyle{}`、
+  `\bibliography{}`、`\printbibliography` 一并清掉
+- **标题里残留保护组**：`\section{… for {Text Modality}}` 显示成 `{Text Modality}`，
+  现在提取标题时剥掉内层花括号
+- **参考文献只有 bibtex key**（`pokhrel2022understand`）：源码自带 `arxiv_final.bbl`，
+  但旧版注释写着「arXiv 源码通常不含 .bbl」就没解析。现在新增 `load_bbl()`，
+  从 `.bbl` 读出作者/题名/期刊/年份并清掉 IEEEtran 的宏，编号也改用 `.bbl` 顺序，
+  与原文一致；没有 .bbl 时才退回列 key
+- 测试新增 `scripts/fixtures/latex_probe.py`，覆盖上述清洗与 bbl 解析
+
+> 注：0.6.2 修的是「翻译静默失败 / 系统代理坏事 / gs 找不到」，
+> 但那版包如果没装进 Zotero，跑出来的仍是 0.6.1 的行为。
+
 ## 0.6.2
 
 修「翻译完全没生效、正文全是英文」，以及「图丢失」「没挂回 Zotero」：

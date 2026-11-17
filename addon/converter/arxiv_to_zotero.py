@@ -260,11 +260,37 @@ def expand_macros(text, macros, rounds=2):
     return text
 
 
+def drop_braced_commands(text, names):
+    """整段删掉 \\title{...} / \\author{...} / \\bibliography{...} 这类命令。
+    read_braced 支持嵌套花括号，	hanks{} 里再套 	extbf{} 也不会漏。
+    """
+    for name in names:
+        for _ in range(20):
+            m = re.search(r"\\" + name + r"\s*(?:\[[^\]]*\])?\s*\{", text)
+            if not m:
+                break
+            _, j = read_braced(text, m.end() - 1)
+            text = text[:m.start()] + "\n\n" + text[j:]
+    return text
+
+
 def document_body(text):
     m = re.search(r"\\begin\{document\}", text)
     body = text[m.end():] if m else text
     m2 = re.search(r"\\end\{document\}", body)
-    return body[:m2.start()] if m2 else body
+    body = body[:m2.start()] if m2 else body
+    # 元信息已经在页头用 extract_metadata 抽过了，这里必须删干净：
+    # 否则整段 	itle / uthor / 	hanks 会变成正文第一段
+    body = drop_braced_commands(body, (
+        "thanks", "title", "author", "date", "institute", "affiliation",
+        "bibliographystyle", "bibliography", "addbibresource", "bibliographyfont",
+    ))
+    # \printbibliography / \maketitle 这类无参命令
+    body = re.sub(r"\\(?:printbibliography|printbibliographies)\b", "", body)
+    # 关键词环境：保留内容，只换掉外壳（正文里会有用）
+    body = re.sub(r"\\begin\{(IEEEkeywords|keywords)\}([\s\S]*?)\\end\{\1\}",
+                  lambda mm: "\n\n" + mm.group(2).strip() + "\n\n", body)
+    return body
 
 
 FORMAT_ENV_RE = re.compile(
@@ -419,6 +445,9 @@ def parse_blocks(text):
         j = m.end()
         if j < len(text) and text[j] == "{":
             title, nj = read_braced(text, j)
+            # \section{Separate ... for {Text Modality}}：LaTeX 常用花括号
+            # 保护大小写，渲染到 HTML 前要把这层壳去掉
+            title = re.sub(r"\{([^{}\\]*)\}", r"\1", title)
             out.append("\n\n" + keep("heading", (HEAD_LVL[m.group(1)], title)) + "\n\n")
             i = nj
         else:
@@ -458,6 +487,58 @@ REF_RE = re.compile(r"\\(?:ref|eqref|autoref|cref|Cref|pageref)\s*\{([^}]*)\}")
 LABEL_RE = re.compile(r"\\label\s*\{([^}]*)\}")
 
 
+def clean_bbl_text(s):
+    """把 IEEEtran.bst 生成的 \\bibitem 正文清成可读的一行。"""
+    # 宏定义 / 排版开关整行丢掉
+    s = re.sub(r"\\(?:providecommand|csname|endcsname|typeout|BIBdecl|newblock|"
+               r"BIBentry\w*|BIBforeignlanguage|spaceskip|fontdimen|language|"
+               r"ifx|else|fi|expandafter|relax|protect)\b[^\n]*", " ", s)
+    # 所有带参命令保留参数内容（\emph{...} / \bibinfo{...}{...} / \url{...} ...）
+    for _ in range(5):
+        s = re.sub(r"\\[A-Za-z@]+\s*\{([^{}]*)\}", r"\1", s)
+    s = re.sub(r"\\[A-Za-z@]+", " ", s)
+    s = s.replace("{", "").replace("}", "").replace("~", " ").replace("\\", "")
+    s = s.replace("``", "\u201c").replace("''", "\u201d")
+    s = s.replace("--", "\u2013")
+    s = re.sub(r"\s+", " ", s).strip().strip(".")
+    return html_mod.escape(s)
+
+
+def load_bbl(work_dir):
+    """从 arXiv 源码自带的 .bbl 里读出真正的参考文献条目。
+
+    很多论文（尤其 IEEEtran）会随源码提交编译好的 .bbl，里面是完整的
+    作者/题名/期刊/年份；旧版只列 bibtex key（pokhrel2022understand 这种），
+    等于没有参考文献。返回 (key_order, {key: 可读文本})。
+    """
+    try:
+        files = sorted(Path(work_dir).glob("*.bbl"))
+    except OSError:
+        return [], {}
+    if not files:
+        return [], {}
+    best_order, best_map = [], {}
+    for f in files:
+        try:
+            raw = strip_comments(f.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        parts = re.split(r"\\bibitem\s*(?:\{([^}]*)\})?", raw)
+        # split 结果：[前导, key1, 正文1, key2, 正文2, ...]
+        order, entries = [], {}
+        for i in range(1, len(parts) - 1, 2):
+            key = (parts[i] or "").strip()
+            body = parts[i + 1] if i + 1 < len(parts) else ""
+            body = re.split(r"\\end\{thebibliography\}", body)[0]
+            txt = clean_bbl_text(body)
+            if key and len(txt) > 10:
+                order.append(key)
+                entries[key] = txt
+        if len(order) > len(best_order):
+            best_order, best_map = order, entries
+    return best_order, best_map
+
+
 class RefRegistry:
     """把 \cite{key} 映射成 [n]、把 \ref{tag} 映射成章节/图表号。
 
@@ -465,8 +546,14 @@ class RefRegistry:
     参考文献区列出 key→编号，用户可据此对照原文 bibliography。
     """
 
-    def __init__(self, text):
+    def __init__(self, text, bbl_order=None, bib_entries=None):
         self.cite_num, self.cite_order = {}, []
+        self.bib_entries = bib_entries or {}
+        # 有 .bbl 时以它的顺序为准，正文编号才和文献列表对得上
+        for key in (bbl_order or []):
+            if key and key not in self.cite_num:
+                self.cite_num[key] = len(self.cite_order) + 1
+                self.cite_order.append(key)
         self.ref_map = {}
         self.fig_num, self.tab_num, self.sec_num = 0, 0, [0, 0, 0]
 
@@ -527,12 +614,16 @@ class RefRegistry:
     def bibliography_html(self):
         if not self.cite_order:
             return ""
-        items = "".join('<li id="cite-%d">[%d] %s</li>'
-                        % (n, n, html_mod.escape(k))
-                        for k, n in [(k, self.cite_num[k]) for k in self.cite_order])
+        items = ""
+        for k in self.cite_order:
+            n = self.cite_num[k]
+            txt = self.bib_entries.get(k) or html_mod.escape(k)
+            items += '<li id="cite-%d"><span class="refnum">[%d]</span> %s</li>' % (n, n, txt)
+        note = ("条目来自 arXiv 源码自带的 .bbl，编号与原文一致"
+                if self.bib_entries else
+                "源码未附带 .bbl，按首次引用顺序列出 BibTeX key")
         return ('<div class="bibliography"><h2>参考文献 / References</h2>'
-                '<p class="meta-label">按首次引用顺序编号（key 对应 arXiv 源文献）</p>'
-                '<ol>%s</ol></div>' % items)
+                '<p class="meta-label">%s</p><ol>%s</ol></div>' % (note, items))
 
 
 REFS = None   # 模块级引用表，由 main 初始化
@@ -948,7 +1039,10 @@ def main():
     id_hint = a.id.strip() if a.id else (Path(a.src).stem if a.src else "")
     meta_title, meta_authors = extract_metadata(text, id_hint)
     global REFS
-    REFS = RefRegistry(text)
+    bbl_order, bib_entries = load_bbl(work)
+    if bib_entries:
+        log("参考文献：从 %s 读到 %d 条完整条目" % (work.name, len(bib_entries)))
+    REFS = RefRegistry(text, bbl_order=bbl_order, bib_entries=bib_entries)
     log("引用：%d 篇文献编号，%d 个交叉引用标签"
         % (len(REFS.cite_order), len(REFS.ref_map)))
     text = document_body(text)
