@@ -212,12 +212,66 @@ def _is_loopback(url):
     return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
 
 
+_SYS_PROXIES = None
+
+
+def _system_proxies():
+    """候选代理：macOS 系统代理 + 常见本地端口。只做一次 scutil。"""
+    global _SYS_PROXIES
+    if _SYS_PROXIES is not None:
+        return _SYS_PROXIES
+    out = []
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            r = subprocess.run(["/usr/sbin/scutil", "--proxy"],
+                               capture_output=True, timeout=5)
+            t = r.stdout.decode("utf-8", "replace")
+            if re.search(r"HTTPEnable\s*:\s*1", t):
+                h = (re.search(r"HTTPProxy\s*:\s*(\S+)", t) or [None, ""])[1]
+                p = (re.search(r"HTTPPort\s*:\s*(\d+)", t) or [None, ""])[1]
+                if h and p:
+                    out.append("http://%s:%s" % (h, p))
+        except Exception:
+            pass
+    out.extend(["http://127.0.0.1:7897", "http://127.0.0.1:7890"])
+    _SYS_PROXIES = out
+    return out
+
+
+def _proxy_opener(url):
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": url, "https": url}))
+
+
 def _open(req, timeout):
     # 本机服务一律不代理，避免「代理连不上 localhost」
     if _is_loopback(getattr(req, "full_url", "")):
         return urllib.request.build_opener(
             urllib.request.ProxyHandler({})).open(req, timeout=timeout)
-    return _OPENER.open(req, timeout=timeout)
+    # 直连（或指定代理）优先；连不上再依次试系统代理与常见本地端口。
+    # 这样「为了 arXiv 填了代理」不会反过来把翻译接口弄挂。
+    # 候选顺序：指定/默认 → 直连 → 系统代理 → 常见本地端口
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    candidates = [_OPENER, direct]
+    for p in _system_proxies():
+        if p != _PROXY:
+            candidates.append(_proxy_opener(p))
+    # 每个候选必须用全新的 Request：第一个代理失败后原 req 的状态已被
+    # urllib 改过，直接复用会让后面本来能通的直连也一起失败。
+    def clone(r):
+        return urllib.request.Request(
+            r.full_url, data=r.data, headers=dict(r.headers),
+            method=r.get_method())
+    last = None
+    for op in candidates:
+        try:
+            return op.open(clone(req), timeout=timeout)
+        except Exception as e:
+            last = e
+    if last:
+        raise last
+    return _OPENER.open(clone(req), timeout=timeout)
 
 
 def call_llm(base, model, key, text, attempts=3, settings=None):

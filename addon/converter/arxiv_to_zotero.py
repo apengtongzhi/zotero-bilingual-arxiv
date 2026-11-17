@@ -135,16 +135,58 @@ def fetch_source(arxiv_id, cache_dir, proxy=""):
     url = "https://export.arxiv.org/e-print/" + urllib.parse.quote(arxiv_id, safe="")
     log("下载 e-print：%s" % url)
     # curl 在本机对 arxiv 已验证可用，且比 urllib 更少受代理环境影响
-    cmd = ["curl", "-sS", "-L", "--fail", "--max-time", "120", "-A", UA,
-           "-o", str(dest), url]
+    # 不同域名对代理的需求是相反的，不能写死：
+    #   myai.bupt.edu.cn（翻译） 直连通、系统代理反而 SSL_ERROR_SYSCALL
+    #   export.arxiv.org（下载） 直连 SSL_ERROR_SYSCALL、走系统代理正常
+    # 所以下载这里依次尝试：显式代理 → 直连 → 系统代理 → 常见本地端口，
+    # 哪个通就用哪个，全部失败才报错并把每种方式的原文都带上。
+    def system_proxy():
+        if sys.platform == "darwin":
+            try:
+                r = subprocess.run(["/usr/sbin/scutil", "--proxy"],
+                                   capture_output=True, timeout=5)
+                out = r.stdout.decode("utf-8", "replace")
+                if re.search(r"HTTPEnable\s*:\s*1", out):
+                    h = (re.search(r"HTTPProxy\s*:\s*(\S+)", out) or [None, ""])[1]
+                    p = (re.search(r"HTTPPort\s*:\s*(\d+)", out) or [None, ""])[1]
+                    if h and p:
+                        return "http://%s:%s" % (h, p)
+            except Exception:
+                pass
+        return ""
+
+    attempts = []
     if proxy:
-        cmd[1:1] = ["--proxy", proxy]
-    r = subprocess.run(cmd, capture_output=True, timeout=150)
-    if r.returncode != 0 or not dest.exists() or dest.stat().st_size < 1000:
-        raise RuntimeError("arXiv 源码下载失败：%s" %
-                           r.stderr.decode("utf-8", "replace")[-300:])
-    log("下载完成：%.2f MB" % (dest.stat().st_size / 1048576))
-    return dest
+        attempts.append(("指定代理 " + proxy, ["--proxy", proxy]))
+    attempts.append(("直连", ["--noproxy", "*"]))
+    sp = system_proxy()
+    if sp and sp != proxy:
+        attempts.append(("系统代理 " + sp, ["--proxy", sp]))
+    for fallback in ("http://127.0.0.1:7897", "http://127.0.0.1:7890"):
+        if fallback != proxy and fallback != sp:
+            attempts.append(("本地代理 " + fallback, ["--proxy", fallback]))
+
+    base = ["curl", "-sS", "-L", "--fail", "--max-time", "90", "-A", UA,
+            "-o", str(dest), url]
+    reasons = []
+    for label, extra in attempts:
+        cmd = [base[0]] + extra + base[1:]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=120)
+        except Exception as e:
+            reasons.append("%s：%s" % (label, e))
+            continue
+        if r.returncode == 0 and dest.exists() and dest.stat().st_size > 1000:
+            if label != "直连":
+                log("下载走%s" % label)
+            log("下载完成：%.2f MB" % (dest.stat().st_size / 1048576))
+            return dest
+        reasons.append("%s：%s" % (
+            label, r.stderr.decode("utf-8", "replace").strip()[-160:] or
+            ("HTTP 失败 / 空文件")))
+    raise RuntimeError("arXiv 源码下载失败，已试过：\n  " +
+                       "\n  ".join(reasons) +
+                       "\n若你知道可用代理，可在设置「高级 → 网络代理」里填地址。")
 
 
 def unpack_source(gz, work_dir):
