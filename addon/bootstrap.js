@@ -97,6 +97,14 @@ function makeMenuItem(doc) {
 
 function addMenus(win) {
   var doc = win.document;
+  // 先清掉本插件历史上注入过、但未被 removeMenusForWindow 清理干净的旧菜单项，
+  // 再重新注入。这样即使旧版本留下了重复节点，也不会看到两个相同入口。
+  try {
+    var stale = doc.querySelectorAll("[data-mktero-bilingual]");
+    for (var si = 0; si < stale.length; si++) {
+      if (stale[si].parentNode) stale[si].parentNode.removeChild(stale[si]);
+    }
+  } catch (e) {}
   var targets = [
     { popupID: "zotero-itemmenu", label: "生成双语阅读快照（选 md 文件）…", command: "file", itemMenu: true },
     { popupID: "zotero-itemmenu", label: "生成双语阅读快照（选论文目录）…", command: "folder", itemMenu: true },
@@ -164,6 +172,11 @@ function addMenus(win) {
 }
 
 function removeMenusForWindow(win) {
+  try {
+    if (win.document && win.document.documentElement) {
+      win.document.documentElement.removeAttribute("data-mktero-bilingual-menus");
+    }
+  } catch (e) {}
   var rest = [];
   MkteroBilingual.registrations.forEach(function (r) {
     if (r.win !== win) {
@@ -192,30 +205,9 @@ async function startup({ id, version, rootURI }, reason) {
   MkteroBilingual.rootURI = rootURI;
   await Zotero.initializationPromise;
 
-  // 注册可视化设置面板（工具 → 设置 → Mktero 双语快照）
-  // 面板脚本只操作本机 ~/.mktero_llm_config.json，不把密钥写入 Zotero prefs
-  try {
-    if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.register === "function") {
-      // ID 必须唯一：多个插件实例并存时固定 ID 会抛
-      // "Pane with ID ... already registered"，导致新版面板注册失败、
-      // 用户点到的永远是旧版坏面板。主设置入口已改为独立窗口，
-      // 这里只是可选的补充视图，失败不影响任何功能。
-      var paneId = "mktero-bilingual-prefs-" +
-        (id || "x").replace(/[^A-Za-z0-9]/g, "") + "-" +
-        Math.random().toString(36).slice(2, 8);
-      var prefId = await Zotero.PreferencePanes.register({
-        pluginID: id,
-        id: paneId,
-        src: rootURI + "prefs.xhtml",
-        label: "双语快照（设置见工具菜单）",
-        scripts: [rootURI + "pane.js"],
-        stylesheets: [rootURI + "prefs.css"]
-      });
-      MkteroBilingual.prefPaneId = prefId;
-    }
-  } catch (e) {
-    Zotero.logError(e);
-  }
+  // 设置入口统一为「工具菜单 → API 与环境设置…」打开的独立窗口，
+  // 不再注册 preference pane：避免设置侧栏出现第二个入口、
+  // 也避开 Zotero 片段解析/沙箱/pane ID 冲突这一整条脆弱链路。
 
   Zotero.getMainWindows().forEach(function (win) {
     if (win && win.document) {
@@ -243,14 +235,6 @@ function shutdown({ id, version, rootURI }, reason) {
     removeMenusForWindow(win);
   });
   MkteroBilingual.registrations = [];
-  try {
-    if (MkteroBilingual.prefPaneId && Zotero.PreferencePanes) {
-      Zotero.PreferencePanes.unregister(MkteroBilingual.prefPaneId);
-      MkteroBilingual.prefPaneId = null;
-    }
-  } catch (e) {
-    Zotero.logError(e);
-  }
 }
 
 function uninstall(data, reason) {}
