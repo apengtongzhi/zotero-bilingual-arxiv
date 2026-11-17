@@ -827,7 +827,7 @@ def plain_text(s):
 
 
 # ---------------------------------------------------------------- 图表
-INC_RE = re.compile(r"\\includegraphics\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}")
+INC_RE = re.compile(r"\\includegraphics\s*(?:\[([^\]]*)\])?\s*\{([^}]+)\}")
 
 
 def find_captions(content):
@@ -882,20 +882,41 @@ def resolve_image(ref, work_dir, out_dir, gs_bin):
     return "data:%s;base64,%s" % (mime, base64.b64encode(p.read_bytes()).decode("ascii"))
 
 
+def graphics_design_ratio(opts):
+    """读 LaTeX 的 width=X\linewidth 设计尺寸；只写 scale= 的按整版心处理。
+
+    scale 是相对原图像素的缩放，转 HTML 后没有基准，硬套反而会让图忽大忽小。
+    """
+    m = re.search(r"width\s*=\s*([0-9.]+)\s*\\(?:linewidth|textwidth|columnwidth)",
+                  opts or "", re.I)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return 1.0
+
+
 def render_figure(raw, work_dir, out_dir, gs_bin):
-    refs = INC_RE.findall(raw)
-    imgs, missing = [], 0
-    for ref in refs[:4]:
+    matches = INC_RE.findall(raw)
+    imgs, ratios, missing = [], [], 0
+    for opts, ref in matches[:4]:
         uri = resolve_image(ref, work_dir, out_dir, gs_bin)
         if uri:
             imgs.append(uri)
+            ratios.append(graphics_design_ratio(opts))
         else:
             missing += 1
     caps = find_captions(raw)
     cap = render_inline_tex(caps[0]) if caps else ""
     parts = ['<figure class="figure">']
+    # 有并排子图（设计宽度 <= 0.55 版心）或本图含多张图时排两列，
+    # 否则占满版心。所有图统一到 100% 或 50%，不再忽大忽小。
+    side_by_side = len(imgs) > 1 or any(r <= 0.55 for r in ratios)
+    width = 50.0 if side_by_side else 100.0
     for u in imgs:
-        parts.append('<img src="%s" alt="">' % u)
+        parts.append('<img src="%s" alt="" style="width:%.1f%%;height:auto">'
+                     % (u, width))
     if missing:
         parts.append('<figcaption class="caption">（%d 张图未能定位）%s</figcaption>' % (missing, cap))
     elif cap:
@@ -1006,6 +1027,32 @@ def restore_ph(zh, formulas, fmap):
     return s
 
 
+def _roman(n):
+    table = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+             (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+             (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]
+    out = ""
+    for v, ch in table:
+        while n >= v:
+            out += ch
+            n -= v
+    return out or "I"
+
+
+def ieee_section_num(counters, level):
+    """IEEEtran 的章节编号：I. / A. / 1) —— 与 PDF 里的形式一致。"""
+    if level == 0:
+        return _roman(counters[0]) + "."
+    if level == 1:
+        n = counters[1]
+        letters = ""
+        while n > 0:
+            n, r = divmod(n - 1, 26)
+            letters = chr(65 + r) + letters
+        return (letters or "A") + "."
+    return str(counters[2]) + ")"
+
+
 def build_html(blocks, rendered, translation, fmap, math_css, note,
                title="", authors=None, arxiv_id=""):
     """排版完全对齐 Mktero 双语快照：真实标题+中文标题 / 目录 / 双语标题 / pair 对照。"""
@@ -1036,7 +1083,7 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
             counters[idx] += 1
             for k in range(idx + 1, 3):
                 counters[k] = 0
-            num = ".".join(str(counters[k]) for k in range(idx + 1))
+            num = ieee_section_num(counters, idx)
             toc.append(("sec-%d" % sec[0], b, sec[0], num))
 
     if toc:
@@ -1089,7 +1136,7 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
             hcounters[hi] += 1
             for k in range(hi + 1, 3):
                 hcounters[k] = 0
-            num = ".".join(str(hcounters[k]) for k in range(hi + 1))
+            num = ieee_section_num(hcounters, hi)
             sn = '<span class="secnum" style="%s">%s</span> ' % (secnum_style, num)
             if zh:
                 zh_n += 1

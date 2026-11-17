@@ -70,9 +70,15 @@ body{margin:0;background:#fff;color:var(--ink);
 .solo{padding:.15rem 0 .8rem}
 .solo.trans{background:var(--trans);border-left:3px solid var(--blue);padding:.5rem .95rem;margin:0 0 1rem}
 .pair p,.solo p{margin:.25rem 0}
-.pair img,.solo img,.figure img{max-width:100%;height:auto;display:block;margin:.7rem auto}
-.figure{margin:.5rem 0;text-align:center;break-inside:avoid}
-.figure figcaption,.caption{font-size:.82rem;color:var(--muted);line-height:1.6;text-align:left}
+/* 段落首行缩进：中文阅读习惯，避免整页挤成一片 */
+.pair .cell p,.solo p{text-indent:2em}
+.pair .cell .figure p,.solo .figure p{text-indent:0}
+.pair img,.solo img,.figure img{max-width:100%;height:auto;display:block;margin:.5rem auto}
+/* 图片统一按版心宽度，不让有的图大有的图小 */
+.figure{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;
+ margin:.5rem 0;break-inside:avoid}
+.figure figcaption,.caption{flex:1 1 100%;font-size:.82rem;color:var(--muted);
+ line-height:1.6;text-align:left;text-indent:0}
 .footnote{font-size:.82rem;color:var(--muted);line-height:1.6;text-align:left;margin:.5rem 0}
 table{border-collapse:collapse;width:100%;font-size:.84rem;margin:.6rem 0;break-inside:avoid}
 th,td{border:1px solid var(--line);padding:.35rem .55rem;text-align:left}

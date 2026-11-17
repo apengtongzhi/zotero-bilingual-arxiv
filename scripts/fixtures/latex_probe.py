@@ -42,6 +42,11 @@ order, entries = a.load_bbl(bbl_dir)
 shutil.rmtree(bbl_dir, ignore_errors=True)
 
 print(json.dumps({
+    "ieee_l1": [a.ieee_section_num([i, 0, 0], 0) for i in (1, 2, 4)],
+    "ieee_l2": [a.ieee_section_num([2, i, 0], 1) for i in (1, 2)],
+    "ieee_l3": [a.ieee_section_num([2, 1, i], 2) for i in (1, 2)],
+    "ratio_full": a.graphics_design_ratio("trim=1 2 3 4, clip, scale=0.34"),
+    "ratio_half": a.graphics_design_ratio("width=0.48\\linewidth"),
     "sup": a.clean_bbl_text(r"M. Liu, ``$I^2$VC,'' 2024."),
     "sub": a.clean_bbl_text(r"X. Li, ``H_\infty control,'' 2020."),
     "textsup": a.clean_bbl_text(r"A. B, ``Fast method\\textsuperscript{2},'' 2021."),

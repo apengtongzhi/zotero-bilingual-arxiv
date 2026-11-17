@@ -766,6 +766,15 @@ function makeMenuDoc() {
     eq(/<sup>2<\/sup>/.test(r.sup), true, "$I^2$ 编译成上标", r.sup);
     eq(/<sub>\u221e<\/sub>/.test(r.sub), true, "H_\\infty 编译成下标", r.sub);
     eq(/<sup>2<\/sup>/.test(r.textsup), true, "\\textsuperscript 编译成上标", r.textsup);
+    eq(JSON.stringify(r.ieee_l1), JSON.stringify(["I.", "II.", "IV."]),
+       "IEEE 一级标题用罗马数字", JSON.stringify(r.ieee_l1));
+    eq(JSON.stringify(r.ieee_l2), JSON.stringify(["A.", "B."]),
+       "IEEE 二级标题用字母", JSON.stringify(r.ieee_l2));
+    eq(JSON.stringify(r.ieee_l3), JSON.stringify(["1)", "2)"]),
+       "IEEE 三级标题用数字右括号", JSON.stringify(r.ieee_l3));
+    eq(r.ratio_full, 1, "只写 scale 时按整版心");
+    ok(r.ratio_half < 0.6, "width=0.48\\linewidth 识别为并排子图",
+       String(r.ratio_half));
   } else {
     ok(false, "python 探针可运行", String(probe.stderr || "").slice(0, 200));
   }
