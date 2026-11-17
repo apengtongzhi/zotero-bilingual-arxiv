@@ -228,6 +228,50 @@ const subprocess = {
   }
 };
 
+// ---------------- 极简 XML DOM（DOMParser 桩，仅供 Atom 解析） ----------------
+class XNode {
+  constructor(tag) { this.tagName = tag; this.children = []; this.text = ""; }
+  get textContent() {
+    return this.text + this.children.map((c) => c.textContent).join("");
+  }
+  // 与真实 DOM 一致：支持通配 "*"，并暴露 localName（带前缀的标签靠它匹配）
+  get localName() { return this.tagName; }
+  getElementsByTagName(name) {
+    const out = [];
+    const walk = (n) => {
+      for (const c of n.children) {
+        if (name === "*" || c.tagName === name) out.push(c);
+        walk(c);
+      }
+    };
+    walk(this);
+    return out;
+  }
+}
+
+function parseXml(text) {
+  const root = new XNode("#document");
+  const stack = [root];
+  const re = /<\/?([A-Za-z_][\w:.-]*)[^>]*?(\/?)>|<\?[^>]*\?>|<!--[\s\S]*?-->|([^<]+)/g;
+  let m;
+  while ((m = re.exec(String(text)))) {
+    const raw = m[0];
+    if (m[3] !== undefined) { stack[stack.length - 1].text += m[3]; continue; }
+    if (raw.startsWith("<?") || raw.startsWith("<!--")) continue;
+    const closing = raw.startsWith("</");
+    const selfClose = m[2] === "/";
+    const tag = m[1].replace(/^.*:/, "");
+    if (closing) { if (stack.length > 1) stack.pop(); continue; }
+    const node = new XNode(tag);
+    stack[stack.length - 1].children.push(node);
+    if (!selfClose) stack.push(node);
+  }
+  return root;
+}
+
+function FakeDOMParser() {}
+FakeDOMParser.prototype.parseFromString = function (text) { return parseXml(text); };
+
 // ---------------- 组装沙箱（只给 Zotero 真给的那些） ----------------
 const sandbox = {
   Zotero: zotero,
@@ -249,6 +293,7 @@ const sandbox = {
   setTimeout, clearTimeout, setInterval, clearInterval,
   TextEncoder, TextDecoder,
   URL, URLSearchParams,
+  DOMParser: FakeDOMParser,
   console
 };
 // 刻意不提供：Cc / Ci / Components / ChromeUtils 之外的 XPCOM 入口
@@ -296,6 +341,41 @@ function makeDoc(values) {
   return doc;
 }
 function ev(doc) { return { target: { ownerDocument: doc } }; }
+
+function makeItemStub(fields, creators) {
+  const f = fields || {};
+  return {
+    id: 1,
+    isRegularItem: () => true,
+    getField: (k) => (k in f ? f[k] : ""),
+    getCreators: () => (creators || []).map((n) => ({ firstName: "", lastName: n })),
+    addTag() {}
+  };
+}
+
+function cfgStub() {
+  return {
+    api: { base_url: "https://api.example.com/v1", model: "m", api_key: "sk-x",
+           temperature: 0, timeout: 30 },
+    translation: {}, files: {}, advanced: {}
+  };
+}
+
+// 构造 arXiv Atom 响应；comment 故意带命名空间前缀，贴近真实响应
+function atomFeed(entries) {
+  const body = entries.map((e) => `
+  <entry>
+    <id>http://arxiv.org/abs/${e.id}v1</id>
+    <published>${e.published || "2022-01-01T00:00:00Z"}</published>
+    <title>${e.title}</title>
+    <summary>${e.summary || ""}</summary>
+    <author><name>${e.author || ""}</name></author>
+    ${e.comment ? `<arxiv:comment xmlns:arxiv="http://arxiv.org/schemas/atom">${e.comment}</arxiv:comment>` : ""}
+  </entry>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">${body}</feed>`;
+}
+
 function statusOf(doc) { return doc.getElementById("bs-status").textContent; }
 function footStatusOf(doc) { return doc.getElementById("bs-save-status").textContent; }
 
@@ -437,6 +517,129 @@ function makeMenuDoc() {
   ok(!sandbox.validateApiBase("https://a.com/v1?x=1").ok, "带 query 被拒");
   ok(!sandbox.validateApiBase("https://u:p@a.com/v1").ok, "带账号密码被拒");
   ok(!sandbox.validateApiBase("a.com/v1").ok, "缺协议被拒");
+
+  console.log("\narXiv 版本自动检索：标题相似度");
+  eq(sandbox.titleScore("Attention Is All You Need", "attention is all you need"),
+     1, "同标题（仅大小写不同）得满分");
+  ok(sandbox.titleScore("Attention Is All You Need", "Attention Is Not All You Need") < 0.85,
+     "少一个词就明显掉分");
+  eq(sandbox.titleScore("", "abc"), 0, "空标题得 0");
+  ok(sandbox.titleScore("Deep Residual Learning for Image Recognition", "Deep Residual Learning")
+     > 0.35, "子集标题仍有可用分数");
+
+  console.log("\narXiv 版本自动检索：ID 提取不误伤外文库");
+  const itemIEEE = makeItemStub({
+    title: "Pattern Recognition", DOI: "10.1016/j.patcog.2019.1070", extra: ""
+  });
+  eq(sandbox.extractArxivId(itemIEEE), "",
+     "IEEE DOI 里的 2019.1070 不会被当成 arXiv ID");
+  eq(sandbox.extractArxivId(makeItemStub({ extra: "arXiv: 2201.12345" })), "2201.12345",
+     "Extra 里的 arXiv: 编号能认出来");
+  eq(sandbox.extractArxivId(makeItemStub({ DOI: "10.48550/arXiv.1706.03762" })), "1706.03762",
+     "arXiv 自有 DOI 能认出来");
+  eq(sandbox.extractArxivId(makeItemStub({ extra: "2201.12345" })), "2201.12345",
+     "Extra 里只有裸编号也仍然认");
+
+  console.log("\narXiv 版本自动检索：Atom 解析");
+  const feed = atomFeed([
+    { id: "2201.11111", title: "Attention Is All You Need",
+      author: "Ashish Vaswani", published: "2017-06-12T00:00:00Z",
+      summary: "The dominant sequence transduction models..." },
+    { id: "2201.22222", title: "A Completely Different Paper",
+      author: "Someone Else", published: "2020-01-01T00:00:00Z", summary: "nope" }
+  ]);
+  const parsed = sandbox.parseArxivAtom(feed);
+  eq(parsed.length, 2, "两条候选都解析出来");
+  eq(parsed[0].id, "2201.11111", "从 id 里抽出 arXiv 编号");
+  eq(parsed[0].title, "Attention Is All You Need", "标题解析正确");
+  eq(parsed[0].authors[0], "Ashish Vaswani", "作者解析正确");
+  eq(parsed[0].published.slice(0, 4), "2017", "发布时间解析正确");
+  eq(sandbox.parseArxivAtom("<broken").length, 0, "坏 XML 不会抛异常，返回空列表");
+
+  // 真实响应：export.arxiv.org 抓的，带 arxiv: 命名空间前缀和 opensearch 元数据
+  const realXml = fs.readFileSync(
+    path.join(__dirname, "fixtures", "arxiv_attention.xml"), "utf8");
+  const real = sandbox.parseArxivAtom(realXml);
+  eq(real.length, 3, "真实响应解析出 3 条");
+  eq(real[0].id, "1706.03762", "从带版本号的 id 里抽出编号（1706.03762v7 → 1706.03762）");
+  eq(real[0].title, "Attention Is All You Need", "真实标题");
+  ok(real[0].authors.length >= 5, "作者全解析出来", String(real[0].authors.length));
+  ok(real[0].published.slice(0, 4) === "2017", "发布时间", real[0].published);
+  ok(real[0].comment.length > 0, "带前缀的 arxiv:comment 也读得到", real[0].comment.slice(0, 40));
+
+  console.log("\narXiv 版本自动检索：候选排序");
+  const target = makeItemStub({
+    title: "Attention Is All You Need", date: "2017",
+    abstractNote: "sequence transduction"
+  }, ["Vaswani", "Shazeer"]);
+  const scored = parsed.map(c => ({ cand: c, score: sandbox.scoreCandidate(target, c) }))
+    .sort((a, b) => b.score - a.score);
+  eq(scored[0].cand.id, "2201.11111", "标题+作者都对的那条排第一");
+
+  console.log("\narXiv 版本自动检索：高置信度直接命中（不打扰模型）");
+  httpHandler = (url) => ({ status: 200, text: url.indexOf("export.arxiv.org") >= 0 ? atomFeed([
+    { id: "1706.03762", title: "Attention Is All You Need", author: "Ashish Vaswani",
+      published: "2017-06-12T00:00:00Z" }
+  ]) : "{}" });
+  let hit = await sandbox.resolveArxivVersion(null, target, cfgStub());
+  eq(hit && hit.id, "1706.03762", "自动匹配到 arXiv 编号");
+  ok(/自动匹配/.test(hit.how || ""), "说明是算法匹配的", hit.how);
+  ok(lastRequest.url.indexOf("export.arxiv.org") >= 0, "确实查了 arXiv API");
+
+  console.log("\narXiv 版本自动检索：不确定时交给大模型复核");
+  const ambiguous = atomFeed([
+    { id: "2101.00001", title: "Attention Is All You Need", author: "Anonymous",
+      published: "2015-01-01T00:00:00Z" },
+    { id: "2101.00002", title: "Attention Is All You Need Revisited", author: "Anonymous",
+      published: "2021-01-01T00:00:00Z" }
+  ]);
+  httpHandler = (url, opts) => {
+    if (url.indexOf("export.arxiv.org") >= 0) return { status: 200, text: ambiguous };
+    return { status: 200, text: JSON.stringify({ choices: [{ message: { content: "2" } }] }) };
+  };
+  hit = await sandbox.resolveArxivVersion(null, target, cfgStub());
+  eq(hit && hit.id, "2101.00002", "采用大模型选的第 2 条");
+  ok(/大模型/.test(hit.how || ""), "说明是大模型复核的", hit.how);
+
+  console.log("\narXiv 版本自动检索：模型说都不是");
+  httpHandler = (url) => {
+    if (url.indexOf("export.arxiv.org") >= 0) return { status: 200, text: ambiguous };
+    return { status: 200, text: JSON.stringify({ choices: [{ message: { content: "0" } }] }) };
+  };
+  hit = await sandbox.resolveArxivVersion(null, target, cfgStub());
+  eq(hit, null, "模型判定都不匹配时返回 null，不硬塞一个");
+
+  console.log("\narXiv 版本自动检索：查询语法与放宽策略");
+  const qs = sandbox.arxivQueries('BERT: Pre-training of Deep (Bidirectional) Transformers?');
+  eq(qs.length, 2, "生成标题/全文两条查询");
+  const inner = qs[0].replace(/^ti:"|"$/g, "");
+  ok(!/[():?]/.test(inner), "短语内不再有括号冒号问号，不会打断 arXiv 语法", inner);
+  eq(sandbox.arxivQueries("   ").length, 0, "空标题不产生查询");
+
+  console.log("\narXiv 版本自动检索：标题检索落空时放宽到全文");
+  const seenUrls = [];
+  httpHandler = (url) => {
+    const u = decodeURIComponent(url);
+    seenUrls.push(u);
+    if (u.indexOf("search_query=ti:") >= 0) {
+      return { status: 200, text: '<feed xmlns="http://www.w3.org/2005/Atom"></feed>' };
+    }
+    return { status: 200, text: atomFeed([
+      { id: "1706.03762", title: "Attention Is All You Need", author: "Ashish Vaswani",
+        published: "2017-06-12T00:00:00Z" }
+    ]) };
+  };
+  hit = await sandbox.resolveArxivVersion(null, target, cfgStub());
+  eq(hit && hit.id, "1706.03762", "退到全文检索后命中");
+  ok(seenUrls.some((u) => u.indexOf("search_query=all:") >= 0), "确实用了 all: 查询");
+
+  console.log("\narXiv 版本自动检索：检索失败要说人话");
+  httpHandler = () => new Error("NetworkError when attempting to fetch resource.");
+  let errMsg = "";
+  try { await sandbox.resolveArxivVersion(null, target, cfgStub()); }
+  catch (e) { errMsg = String(e.message || e); }
+  ok(/检索 arXiv 失败/.test(errMsg), "指出是检索失败", errMsg);
+  ok(/Extra/.test(errMsg), "并告诉用户可以手填 Extra 绕过", errMsg);
 
   console.log("\n配置读写（兼容旧扁平格式）");
   // PathUtils 上没有 homeDir 时，必须还能靠 dirsvc 拿到家目录，
@@ -655,12 +858,12 @@ function makeMenuDoc() {
   const mdoc = makeMenuDoc();
   const mwin = { document: mdoc, setTimeout: setTimeout };
   sandbox.addMenus(mwin);
-  eq(mdoc.count(), 9, "共注入 9 个菜单项");
-  eq(mdoc.popupCount("zotero-itemmenu"), 4, "右键菜单 4 项（3 个入口 + 设置）");
-  eq(mdoc.popupCount("menu_ToolsPopup"), 5, "工具菜单 5 项");
+  eq(mdoc.count(), 11, "共注入 11 个菜单项");
+  eq(mdoc.popupCount("zotero-itemmenu"), 5, "右键菜单 5 项（4 个入口 + 设置）");
+  eq(mdoc.popupCount("menu_ToolsPopup"), 6, "工具菜单 6 项（4 个入口 + 设置 + 自检）");
   // 再注入一次：不应出现重复
   sandbox.addMenus(mwin);
-  eq(mdoc.count(), 9, "重复注入不会翻倍（先清理旧节点）");
+  eq(mdoc.count(), 11, "重复注入不会翻倍（先清理旧节点）");
   // 选中状态联动
   mockSelected = [{ isRegularItem: () => true }];
   mdoc.firePopup("zotero-itemmenu");
@@ -749,6 +952,36 @@ function makeMenuDoc() {
   mockAlerts.length = 0;
   await sandbox.run(zwin, "file");
   ok(mockAlerts.join(" ").indexOf("请先在文献列表中选中") >= 0, "提示先选条目");
+
+  // MB_LIVE=1：额外跑一次真实 arXiv 检索，验证查询语法与真实响应格式。
+  // 需要能访问 export.arxiv.org（走了代理的话继承 HTTPS_PROXY）。
+  if (process.env.MB_LIVE) {
+    console.log("\n[LIVE] 真实 arXiv 检索（export.arxiv.org）");
+    const { execFileSync } = require("child_process");
+    httpHandler = (url) => {
+      try {
+        const out = execFileSync("curl",
+          ["-sL", "--http1.1", "--max-time", "45", url],
+          { encoding: "utf8", env: process.env, maxBuffer: 8 << 20 });
+        return { status: 200, text: out };
+      } catch (e) {
+        return new Error("curl failed: " + e.message);
+      }
+    };
+    const liveItem = makeItemStub(
+      { title: "Attention Is All You Need", date: "2017" }, ["Vaswani"]);
+    const live = await sandbox.searchArxivByTitle("Attention Is All You Need", 5);
+    ok(live.ok && live.candidates.length > 0, "真实检索拿到候选",
+       String(live.candidates && live.candidates.length));
+    if (live.ok && live.candidates.length) {
+      const ranked = live.candidates
+        .map((c) => ({ c, s: sandbox.scoreCandidate(liveItem, c) }))
+        .sort((a, b) => b.s - a.s);
+      eq(ranked[0].c.id, "1706.03762", "真实候选里排序第一的是正确那篇");
+      ok(ranked[0].s >= 0.86, "分数够高，不需要惊动大模型",
+         String(Math.round(ranked[0].s * 100) / 100));
+    }
+  }
 
   console.log("\n" + (failures ? failures + " 个用例失败" : "全部通过"));
   fs.rmSync(TMP, { recursive: true, force: true });

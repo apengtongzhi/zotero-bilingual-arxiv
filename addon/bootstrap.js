@@ -758,9 +758,11 @@ function addMenus(win) {
   var targets = [
     { popupID: "zotero-itemmenu", label: "生成双语阅读快照（选 md 文件）…", command: "file", itemMenu: true },
     { popupID: "zotero-itemmenu", label: "生成双语阅读快照（选论文目录）…", command: "folder", itemMenu: true },
+    { popupID: "zotero-itemmenu", label: "找 arXiv 版并生成双语快照（自动检索）…", command: "arxivAuto", itemMenu: true },
     { popupID: "zotero-itemmenu", label: "从 arXiv 生成双语快照…", command: "arxiv", itemMenu: true },
     { popupID: "menu_ToolsPopup", label: "生成双语阅读快照（选 md 文件）…", command: "file" },
     { popupID: "menu_ToolsPopup", label: "生成双语阅读快照（选论文目录）…", command: "folder" },
+    { popupID: "menu_ToolsPopup", label: "找 arXiv 版并生成双语快照（自动检索）…", command: "arxivAuto" },
     { popupID: "menu_ToolsPopup", label: "从 arXiv 生成双语快照…", command: "arxiv" },
     { popupID: "zotero-itemmenu", label: "双语快照：API 与环境设置…", command: "settings", itemMenu: true },
     { popupID: "menu_ToolsPopup", label: "双语快照：API 与环境设置…", command: "settings" },
@@ -785,6 +787,8 @@ function addMenus(win) {
         task = selfCheck(win);
       } else if (t.command === "arxiv") {
         task = runArxiv(win);
+      } else if (t.command === "arxivAuto") {
+        task = runArxivAuto(win);
       } else {
         task = run(win, t.command);
       }
@@ -1077,36 +1081,367 @@ async function runScript(args) {
 
 // 从 Zotero 条目的 URL / Extra / DOI 里提取 arXiv ID
 function extractArxivId(item) {
-  var text = "";
+  // 只在明确写了 arXiv 的地方认新式 ID。旧版还有一条「裸 4 位.4~5 位」的兜底正则，
+  // 它会从 IEEE 的 DOI（如 10.1016/j.patcog.2019.1070）里抓出 2019.1070 这种假 ID，
+  // 所以现在只在 extra / archiveID 这类「本来就在讲 arXiv」的字段里才允许裸 ID。
+  var strong = "";
+  var weak = "";
   try {
-    ["url", "DOI", "extra", "archiveID", "repository"].forEach(function (f) {
-      try { text += " " + (item.getField(f) || ""); } catch (e) {}
+    ["url", "DOI", "repository"].forEach(function (f) {
+      try { strong += " " + (item.getField(f) || ""); } catch (e) {}
+    });
+    ["extra", "archiveID", "callNumber"].forEach(function (f) {
+      try { weak += " " + (item.getField(f) || ""); } catch (e) {}
     });
   } catch (e) {}
   var pats = [
     /arxiv\.org\/(?:abs|pdf|e-print)\/([0-9]{4}\.[0-9]{4,5})(?:v\d+)?/i,
-    /arxiv:([0-9]{4}\.[0-9]{4,5})(?:v\d+)?/i,
-    /10\.48550\/arxiv\.([0-9]{4}\.[0-9]{4,5})/i,
-    /\b([0-9]{4}\.[0-9]{4,5})\b/
+    /arxiv:\s*([0-9]{4}\.[0-9]{4,5})(?:v\d+)?/i,
+    /10\.48550\/arxiv\.([0-9]{4}\.[0-9]{4,5})/i
   ];
   for (var i = 0; i < pats.length; i++) {
-    var m = text.match(pats[i]);
+    var m = strong.match(pats[i]) || weak.match(pats[i]);
     if (m) return m[1];
+  }
+  // arXiv 支持旧式 ID（如 cs/0112017），只在字段里明确带 arXiv 时才认
+  var old = (strong + " " + weak).match(/arxiv[:\s/]*([a-z\-]+(?:\.[A-Z]{2})?\/[0-9]{7})/i);
+  if (old) return old[1];
+  // 最后才用裸 ID，且仅限 extra / archiveID
+  var bare = weak.match(/\b([0-9]{4}\.[0-9]{4,5})\b/);
+  if (bare) return bare[1];
+  return "";
+}
+
+// ---- 自动找 arXiv 预印本 ----
+// 论文常常来自 IEEE / ACM / Springer，这些条目里没有 arXiv ID，但很多都有预印本。
+// 顺序：条目字段里能看出 ID 就不搜 → arXiv Atom API 按标题检索 → 打分排序 →
+// 分数不够高或有并列时，交给配置好的大模型复核（它同时看标题、作者、摘要摘要）。
+// 命中的话仍然弹一次确认框：下载 + 翻译要好几分钟，不能让机器自作主张。
+
+// 标题归一化：去 LaTeX 命令、标点、大小写差异
+function normTitle(s) {
+  return String(s || "")
+    .replace(/\\[a-zA-Z]+\s*/g, " ")          // \emph \mathrm 之类
+    .replace(/[{}$^_~]/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// 词集合 Jaccard，再乘长度比惩罚：防止「Attention Is All You Need」命中
+// 一堆标题里都含 attention 的文章
+function titleScore(a, b) {
+  var A = normTitle(a).split(" ").filter(Boolean);
+  var B = normTitle(b).split(" ").filter(Boolean);
+  if (!A.length || !B.length) return 0;
+  var setA = {}, setB = {};
+  A.forEach(function (w) { setA[w] = 1; });
+  B.forEach(function (w) { setB[w] = 1; });
+  var inter = 0;
+  Object.keys(setA).forEach(function (w) { if (setB[w]) inter++; });
+  if (!inter) return 0;
+  var uni = Object.keys(setA).length + Object.keys(setB).length - inter;
+  var jac = inter / uni;
+  var lenRatio = Math.min(A.length, B.length) / Math.max(A.length, B.length);
+  return jac * (0.55 + 0.45 * lenRatio);
+}
+
+// Atom 里有的字段带命名空间前缀（<arxiv:comment>），直接按标签名查会漏。
+// 统一取全部后代再比 localName（真实 DOM 上 tagName 是 "arxiv:comment"，
+// localName 才是 "comment"）。
+function atomText(el, name) {
+  if (!el) return "";
+  var all = [];
+  try { all = el.getElementsByTagName("*") || []; } catch (e) { return ""; }
+  for (var i = 0; i < all.length; i++) {
+    var n = all[i];
+    var t = String(n.localName || n.tagName || "").toLowerCase();
+    if (t === name) return String(n.textContent || "").trim();
   }
   return "";
 }
 
-// 从 arXiv LaTeX 源码生成双语快照：下载→解析→翻译→排版→挂回 Zotero
-async function runArxiv(win) {
+// 解析 arXiv API 的 Atom 响应
+function parseArxivAtom(xml) {
+  var out = [];
+  var doc = null;
+  try {
+    doc = new DOMParser().parseFromString(String(xml || ""), "application/xml");
+  } catch (e) {
+    return out;
+  }
+  if (!doc) return out;
+  var entries = doc.getElementsByTagName("entry");
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    var idText = atomText(e, "id");                       // http://arxiv.org/abs/2201.12345v1
+    var m = idText.match(/abs\/([^v\s]+?)(?:v\d+)?$/i) || idText.match(/([0-9]{4}\.[0-9]{4,5})/);
+    if (!m) continue;
+    var authors = [];
+    var names = e.getElementsByTagName("name");
+    for (var j = 0; j < names.length; j++) {
+      authors.push(String(names[j].textContent || "").trim());
+    }
+    out.push({
+      id: m[1],
+      title: atomText(e, "title").replace(/\s+/g, " "),
+      summary: atomText(e, "summary").replace(/\s+/g, " "),
+      published: atomText(e, "published"),
+      updated: atomText(e, "updated"),
+      comment: atomText(e, "comment"),
+      authors: authors
+    });
+  }
+  return out;
+}
+
+function httpText(method, url, timeoutMs) {
+  return Zotero.HTTP.request(method, url, {
+    responseType: "text",
+    timeout: timeoutMs || 20000,
+    successCodes: false
+  }).then(function (xhr) {
+    var text = "";
+    try { text = String(xhr.responseText || ""); } catch (e) {}
+    return { status: xhr.status, text: text };
+  });
+}
+
+// arXiv 检索。先用标题精确检索，落空就放宽到全文；https 不通再退回 http
+// （国内网络环境下 export.arxiv.org 的 https 偶尔连不上）
+function arxivQueries(title) {
+  // 括号、冒号、引号会破坏 arXiv 的查询语法，先清掉
+  var clean = String(title || "")
+    .replace(/["\\(){}[\]:'?;,!]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+  if (!clean) return [];
+  return ['ti:"' + clean + '"', 'all:"' + clean + '"'];
+}
+
+async function searchArxivByTitle(title, maxResults) {
+  var queries = arxivQueries(title);
+  if (!queries.length) return { ok: true, candidates: [], endpoint: "" };
+  var hosts = ["https://export.arxiv.org", "http://export.arxiv.org"];
+  var lastErr = null;
+  var gotAny = false;
+  for (var qi = 0; qi < queries.length; qi++) {
+    for (var hi = 0; hi < hosts.length; hi++) {
+      var url = hosts[hi] + "/api/query?search_query=" + encodeURIComponent(queries[qi])
+        + "&start=0&max_results=" + (maxResults || 8);
+      try {
+        var r = await httpText("GET", url, 25000);
+        if (r.status >= 200 && r.status < 300) {
+          var cands = parseArxivAtom(r.text);
+          if (cands.length) return { ok: true, candidates: cands, endpoint: url };
+          gotAny = true;              // 通了，只是这条查询没结果
+          break;                      // 同一查询不必再试 http
+        }
+        lastErr = "HTTP " + r.status;
+      } catch (e) {
+        lastErr = String(e && e.message ? e.message : e);
+      }
+    }
+    if (gotAny && qi === 0) {
+      // 标题检索没命中，给它一点间隔再试全文检索（arXiv 要求别连打）
+      await new Promise(function (r) { setTimeout(r, 1200); });
+    }
+  }
+  if (gotAny) return { ok: true, candidates: [], endpoint: "" };
+  return { ok: false, error: lastErr || "未知错误" };
+}
+
+// 候选打分：标题为主，作者姓氏、年份辅助
+function scoreCandidate(item, c) {
+  var tScore = titleScore(item.getField("title"), c.title);
+  var surnames = [];
+  try {
+    (item.getCreators() || []).forEach(function (cr) {
+      var s = String(cr.lastName || "").toLowerCase().trim();
+      if (s) surnames.push(s);
+    });
+  } catch (e) {}
+  var authorText = (c.authors || []).join(" ").toLowerCase();
+  var hit = 0;
+  surnames.forEach(function (s) { if (authorText.indexOf(s) >= 0) hit++; });
+  var aScore = surnames.length ? hit / surnames.length : 0;
+
+  var yItem = String(item.getField("date") || "").match(/\d{4}/);
+  var yCand = String(c.published || "").match(/\d{4}/);
+  var yScore = 0.5;
+  if (yItem && yCand) {
+    var d = Math.abs(parseInt(yItem[0], 10) - parseInt(yCand[0], 10));
+    yScore = d === 0 ? 1 : d === 1 ? 0.7 : d === 2 ? 0.4 : 0.1;
+  }
+  return 0.72 * tScore + 0.2 * aScore + 0.08 * yScore;
+}
+
+// 通用 LLM 调用（非 UI），返回纯文本
+async function callChat(settings, messages, maxTokens) {
+  var base = String(settings.api.base_url || "").trim();
+  var model = String(settings.api.model || "").trim();
+  var key = String(settings.api.api_key || "").trim();
+  var v = validateApiBase(base);
+  if (!v.ok) throw new Error(v.error);
+  if (!model) throw new Error("还没配置模型名");
+  var headers = { "Content-Type": "application/json" };
+  if (key) headers.Authorization = "Bearer " + key;
+  var timeout = Math.round(Number(settings.api.timeout) || 120);
+  if (!(timeout >= 10)) timeout = 10;
+  var r = await Zotero.HTTP.request("POST", chatCompletionsUrl(base), {
+    headers: headers,
+    body: JSON.stringify({
+      model: model, messages: messages,
+      max_tokens: maxTokens || 16, temperature: 0
+    }),
+    responseType: "text",
+    timeout: timeout * 1000,
+    successCodes: false
+  });
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error("HTTP " + r.status + "：" +
+      String(r.responseText || "").replace(/\s+/g, " ").slice(0, 200));
+  }
+  var parsed = JSON.parse(String(r.responseText || "{}"));
+  return String((parsed.choices && parsed.choices[0] && parsed.choices[0].message
+    && parsed.choices[0].message.content) || "").trim();
+}
+
+// 让大模型在候选里挑一个。只让它输出序号，解析失败就当作「没把握」
+async function llmPickArxiv(settings, item, cands) {
+  var lines = [];
+  lines.push("我在为一篇文献匹配它的 arXiv 预印本。请判断下面哪个候选是同一篇论文（同一工作的预印本也算），只输出一个序号数字，不要解释。");
+  lines.push("");
+  lines.push("【待匹配文献】");
+  lines.push("标题：" + (item.getField("title") || ""));
+  try {
+    var people = (item.getCreators() || []).map(function (c) {
+      return [c.firstName, c.lastName].filter(Boolean).join(" ");
+    }).slice(0, 6);
+    if (people.length) lines.push("作者：" + people.join(", "));
+  } catch (e) {}
+  var date = "";
+  try { date = item.getField("date") || ""; } catch (e) {}
+  if (date) lines.push("年份：" + date);
+  var abs = "";
+  try { abs = String(item.getField("abstractNote") || "").slice(0, 600); } catch (e) {}
+  if (abs) lines.push("摘要：" + abs);
+  lines.push("");
+  lines.push("【候选】");
+  cands.forEach(function (c, i) {
+    lines.push((i + 1) + ". 标题：" + c.title);
+    lines.push("   作者：" + (c.authors || []).slice(0, 6).join(", "));
+    lines.push("   发布：" + (c.published || "").slice(0, 10)
+      + (c.comment ? "　备注：" + c.comment.slice(0, 120) : ""));
+    lines.push("   摘要：" + (c.summary || "").slice(0, 400));
+  });
+  lines.push("");
+  lines.push("如果都不是同一篇，输出 0。只输出数字。");
+
+  var reply = await callChat(settings, [
+    { role: "system", content: "你是文献匹配助手，只输出数字。" },
+    { role: "user", content: lines.join("\n") }
+  ], 8);
+  var m = String(reply).match(/\b(\d{1,2})\b/);
+  if (!m) return 0;
+  var n = parseInt(m[1], 10);
+  return n >= 1 && n <= cands.length ? n : 0;
+}
+
+// 选出最可能的 arXiv 版本，返回 {id, cand, how, score} 或 null
+async function resolveArxivVersion(win, item, settings) {
+  var direct = extractArxivId(item);
+  if (direct) return { id: direct, cand: null, how: "条目字段里已有 arXiv ID" };
+
+  var title = "";
+  try { title = item.getField("title") || ""; } catch (e) {}
+  if (!title) return null;
+
+  var res = await searchArxivByTitle(title, 8);
+  if (!res.ok) {
+    throw new Error("检索 arXiv 失败（" + res.error + "）。\n"
+      + "如果是网络原因，可以先在「设置 → 高级」里配好能访问 arXiv 的网络，"
+      + "或者手动把 ID 写进条目的 Extra 字段，例如：arXiv: 2201.12345");
+  }
+  if (!res.candidates.length) return null;
+
+  var scored = res.candidates.map(function (c) {
+    return { cand: c, score: scoreCandidate(item, c) };
+  }).sort(function (x, y) { return y.score - x.score; });
+
+  var best = scored[0];
+  var second = scored[1];
+  // 分数足够高、且与第二名拉开距离，就不用麻烦模型了
+  var confident = best.score >= 0.86 && (!second || best.score - second.score >= 0.06);
+
+  if (!confident) {
+    // 交给大模型复核（用户配了 API 才有意义；没配就退回纯算法结果）
+    var canLLM = false;
+    try { canLLM = !!(settings.api.base_url && settings.api.model); } catch (e) {}
+    if (canLLM) {
+      var top = scored.slice(0, Math.min(5, scored.length));
+      var pick = 0;
+      try {
+        pick = await llmPickArxiv(settings, item,
+          top.map(function (s) { return s.cand; }));
+      } catch (e) {
+        Zotero.logError(e);
+        pick = 0;
+      }
+      if (pick === 0) return null;          // 模型明确说都不是
+      if (pick > 0) {
+        return {
+          id: top[pick - 1].cand.id,
+          cand: top[pick - 1].cand,
+          score: top[pick - 1].score,
+          how: "大模型复核后认定"
+        };
+      }
+    }
+  }
+  return { id: best.cand.id, cand: best.cand, score: best.score, how: "标题/作者自动匹配" };
+}
+
+function confirmMatch(win, item, hit) {
+  var title = "";
+  try { title = item.getField("title") || ""; } catch (e) {}
+  var lines = [];
+  lines.push("条目：" + title);
+  lines.push("");
+  if (hit.cand) {
+    lines.push("找到 arXiv 预印本：" + hit.id + "（" + hit.how + "）");
+    lines.push("标题：" + hit.cand.title);
+    lines.push("作者：" + (hit.cand.authors || []).slice(0, 4).join(", "));
+    lines.push("发布：" + String(hit.cand.published || "").slice(0, 10));
+    lines.push("匹配度：" + Math.round((hit.score || 0) * 100) + "%");
+  } else {
+    lines.push("条目字段里的 arXiv ID：" + hit.id);
+  }
+  lines.push("");
+  lines.push("用它下载 LaTeX 源码并生成双语快照吗？");
+  return Services.prompt.confirm(win, "找到 arXiv 版本", lines.join("\n"));
+}
+
+function selectedRegularItem(win, titleForMsg) {
   var items = [];
   try {
     items = Zotero.getActiveZoteroPane().getSelectedItems() || [];
   } catch (e) { Zotero.logError(e); }
   var item = items.filter(function (i) { return i.isRegularItem(); })[0];
   if (!item) {
-    alertWin(win, "arXiv 双语快照", "请先在文献列表中选中一个文献条目（不是附件或笔记）。");
-    return;
+    alertWin(win, titleForMsg || "arXiv 双语快照",
+      "请先在文献列表中选中一个文献条目（不是附件或笔记）。");
+    return null;
   }
+  return item;
+}
+
+// 入口一：手动 —— 用条目里的 arXiv ID，没有就让人输
+async function runArxiv(win) {
+  var item = selectedRegularItem(win);
+  if (!item) return;
 
   var arxivId = extractArxivId(item);
   if (!arxivId) {
@@ -1124,7 +1459,43 @@ async function runArxiv(win) {
     }
     arxivId = m[1];
   }
+  await generateFromArxiv(win, item, arxivId);
+}
 
+// 入口二：自动 —— 论文来自 IEEE/Science 等，先去找它的 arXiv 预印本
+async function runArxivAuto(win) {
+  var item = selectedRegularItem(win, "自动检索 arXiv");
+  if (!item) return;
+
+  var settings;
+  try { settings = MkteroConfig.read(); }
+  catch (e) { settings = MkteroConfig.DEFAULT; }
+
+  var id = "";
+  try {
+    var finish = progress("正在检索 arXiv 预印本…");
+    var hit = await resolveArxivVersion(win, item, settings);
+    finish(!!hit);
+    if (!hit) {
+      alertWin(win, "没找到 arXiv 版本",
+        "按标题没有检索到对应的 arXiv 预印本（也有可能这篇确实没挂在 arXiv 上）。\n\n"
+        + "你可以：\n"
+        + "· 自己搜到后把「arXiv: 编号」写进条目的 Extra 字段，再点「从 arXiv 生成」\n"
+        + "· 或在 Google Scholar 里点 All versions，看有没有 arXiv 版");
+      return;
+    }
+    if (!confirmMatch(win, item, hit)) return;
+    id = hit.id;
+  } catch (e) {
+    Zotero.logError(e);
+    alertWin(win, "自动检索 arXiv", String(e && e.message ? e.message : e));
+    return;
+  }
+  await generateFromArxiv(win, item, id);
+}
+
+// 从 arXiv LaTeX 源码生成双语快照：下载→解析→翻译→排版→挂回 Zotero
+async function generateFromArxiv(win, item, arxivId) {
   // 输出目录：设置里配了默认目录就直接用，否则每次询问
   var settings;
   try { settings = MkteroConfig.read(); }

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0
+
+新增「找 arXiv 版并生成双语快照（自动检索）」：论文来自 IEEE / Springer / ACM、条目里没有 arXiv ID 时，
+自动去找它的 arXiv 预印本，再走 LaTeX 翻译流程。
+
+- 匹配分四步：条目自带 ID（DOI `10.48550/arXiv.*` / URL / Extra 里的 `arXiv: 编号`）→ arXiv Atom API 按标题检索
+  （`ti:` 落空自动放宽到 `all:`，https 不通退 http）→ 标题 Jaccard + 作者姓氏 + 年份打分 →
+  分数不够高或有并列时交给大模型复核（只让它输出序号，输出 0 即判定都不是，不硬塞）
+- 命中后弹确认框，列出 arXiv 编号、标题、作者、匹配度，确认了才下载，避免白等几分钟翻译一篇错的
+- 没找到时明确提示，并给出绕行办法（手写 Extra、Google Scholar All versions）
+- **修掉一个会下错论文的隐患**：旧的 ID 正则含一条裸「4 位.4~5 位」兜底，会把 IEEE DOI
+  `10.1016/j.patcog.2019.1070` 里的 `2019.1070` 当成 arXiv 编号。现在裸编号只在 `extra` / `archiveID`
+  这类本来就在讲 arXiv 的字段里才认，同时补了旧式 ID（`cs/0112017`）的支持
+- Atom 解析改为按 localName 匹配：真实响应里 `<arxiv:comment>` 带命名空间前缀，按标签名查会漏
+- 测试补齐：18 条新断言，并用 `scripts/fixtures/arxiv_attention.xml`（export.arxiv.org 的真实响应）
+  验证解析；`MB_LIVE=1 node scripts/sandbox_check.js` 可跑一次真实网络检索
+
 ## 0.5.5
 
 修「保存失败：file.exists is not a function」——0.5.4 修掉家目录之后紧接着撞上的第二个坑：
