@@ -38,7 +38,9 @@ jobs:
       - name: Build XPI and update.json
         run: |
           REPO="${GITHUB_REPOSITORY}"
-          BASE="https://github.com/${REPO}/releases/download/release"
+          # update_link 必须指向 XPI 真正所在的版本 release（vX.Y.Z），
+          # 而不是只放 update.json 的长期 release tag，否则自动更新会 404。
+          BASE="https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}"
           python3 scripts/build.py --release-url "$BASE"
 
       - name: Create version release with XPI

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- 修复自动更新清单 update.json 的 update_link 指向错误（应指向版本 release 的 xpi，而非只放清单的 release tag）
+
 ## 0.4.0
 
 - 新增可视化设置面板（工具 → 设置 → 双语快照 / arXiv 翻译），API 的 Base URL / 模型 / Key 可替换，带「测试连接」
