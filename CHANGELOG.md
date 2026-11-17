@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3
+
+- 修复设置面板仍为空白：片段缺少 xmlns:html 声明，Zotero 严格 XML 解析抛 unbound prefix 导致窗格加载失败
+- 面板脚本改为沙箱安全版：顶层不触碰 XPCOM，全部延迟到交互并逐层异常兜底，避免脚本报错中断窗格加载
+
 ## 0.4.2
 
 - 修复设置面板：prefs.xhtml 改为 Zotero 要求的 XUL 片段格式（去掉 XML 声明与内嵌 style），CSS 独立注册；窗格内容不再加载失败
