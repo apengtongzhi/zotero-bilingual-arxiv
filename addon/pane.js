@@ -162,10 +162,13 @@ async function mkteroTestLLM() {
 }
 
 function mkteroInit() {
+  if (MkteroPrefs.initialized) return;
   try {
     var saveBtn = document.getElementById("mktero-save");
     var testBtn = document.getElementById("mktero-test-llm");
     var toggleBtn = document.getElementById("mktero-toggle-key");
+    if (!saveBtn && !testBtn && !toggleBtn) return;  // DOM 尚未注入，留待下次
+    MkteroPrefs.initialized = true;
     if (saveBtn) saveBtn.addEventListener("command", mkteroSaveConfig);
     if (testBtn) testBtn.addEventListener("command", mkteroTestLLM);
     if (toggleBtn) {
@@ -183,8 +186,15 @@ function mkteroInit() {
   }
 }
 
+// 偏好面板脚本在片段注入后执行，此时宿主窗口可能早已触发 load，
+// 因此立即初始化一次，并保留 DOMContentLoaded / load 作为兜底。
+// mkteroInit 内部用 getElementById 找元素，重复调用也只是重复绑定一次，安全。
+mkteroInit();
+if (typeof document !== "undefined") {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mkteroInit, { once: true });
+  }
+}
 if (typeof window !== "undefined") {
   window.addEventListener("load", mkteroInit, { once: true });
-} else if (typeof document !== "undefined") {
-  mkteroInit();
 }

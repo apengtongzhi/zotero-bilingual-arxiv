@@ -200,7 +200,8 @@ async function startup({ id, version, rootURI }, reason) {
         id: "mktero-bilingual-prefs",
         src: rootURI + "prefs.xhtml",
         label: "双语快照 / arXiv 翻译",
-        scripts: [rootURI + "pane.js"]
+        scripts: [rootURI + "pane.js"],
+        stylesheets: [rootURI + "prefs.css"]
       });
       MkteroBilingual.prefPaneId = prefId;
     }

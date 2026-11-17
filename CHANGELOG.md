@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- 修复设置面板：prefs.xhtml 改为 Zotero 要求的 XUL 片段格式（去掉 XML 声明与内嵌 style），CSS 独立注册；窗格内容不再加载失败
+- 面板脚本初始化改为多时机兜底，确保按钮事件正确绑定
+
 ## 0.4.1
 
 - 修复自动更新清单 update.json 的 update_link 指向错误（应指向版本 release 的 xpi，而非只放清单的 release tag）

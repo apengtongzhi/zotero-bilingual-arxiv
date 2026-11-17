@@ -1,0 +1,27 @@
+.mktero-prefpane .mktero-group {
+  margin: 0 0 1.6rem;
+}
+.mktero-prefpane .mktero-h {
+  font-weight: 600;
+  font-size: 1.05rem;
+  display: block;
+  margin: 0 0 .6rem;
+}
+.mktero-prefpane .mktero-l {
+  min-width: 9em;
+}
+.mktero-prefpane .mktero-hint {
+  color: #777;
+  font-size: .85rem;
+  margin: .35rem 0 .7rem 9.5em;
+}
+.mktero-prefpane label#mktero-llm-status {
+  font-size: .86rem;
+  min-width: 12em;
+}
+.mktero-prefpane label#mktero-llm-status[class*="ok"] {
+  color: #1a7f37;
+}
+.mktero-prefpane label#mktero-llm-status[class*="err"] {
+  color: #c0392b;
+}
