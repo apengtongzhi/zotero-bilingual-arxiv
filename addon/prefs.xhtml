@@ -1,0 +1,18 @@
+<vbox id="mktero-prefpane" style="padding:10px 16px">
+  <groupbox>
+    <label value="双语快照 / arXiv 翻译" style="font-weight:600;font-size:1.05rem;"/>
+    <description style="margin:8px 0;">
+      把 Mktero 双语 Markdown 或 arXiv LaTeX 源码转成自包含双语 HTML 快照，挂回 Zotero 条目。
+    </description>
+    <description style="margin:0 0 10px;">
+      LLM API、转换器目录、python 路径等设置在独立窗口中配置。点击下方按钮打开。
+    </description>
+    <hbox>
+      <button id="mktero-pane-open-settings" label="打开 API 与环境设置…"
+              oncommand="Zotero.MkteroBilingual.openSettings();"/>
+      <button id="mktero-pane-selftest" label="自检…"
+              oncommand="Zotero.MkteroBilingual.selfCheck();"/>
+    </hbox>
+    <label value="若上方按钮无反应：工具 → 「双语快照：API 与环境设置…」，或右键文献条目 → 同名菜单项。" style="color:#666;font-size:.85rem;margin-top:10px;"/>
+  </groupbox>
+</vbox>

@@ -11,6 +11,19 @@ var MkteroBilingual = {
   registrations: []
 };
 
+// preference pane 的 XHTML 在设置窗口作用域里执行，访问不到 bootstrap 的局部变量。
+// 挂到 Zotero 全局，供片段里的 oncommand 调用。
+Zotero.MkteroBilingual = {
+  openSettings: function () {
+    var win = Zotero.getMainWindow();
+    if (win) openSettings(win);
+  },
+  selfCheck: function () {
+    var win = Zotero.getMainWindow();
+    if (win) selfCheck(win);
+  }
+};
+
 var PREFIX = "extensions.mkterobilang.";
 
 var DEFAULTS = {
@@ -205,9 +218,24 @@ async function startup({ id, version, rootURI }, reason) {
   MkteroBilingual.rootURI = rootURI;
   await Zotero.initializationPromise;
 
-  // 设置入口统一为「工具菜单 → API 与环境设置…」打开的独立窗口，
-  // 不再注册 preference pane：避免设置侧栏出现第二个入口、
-  // 也避开 Zotero 片段解析/沙箱/pane ID 冲突这一整条脆弱链路。
+  // 设置侧栏项：极简纯 XUL 片段（无 XML 声明、无 html: 前缀、无内嵌 style 标签、
+  // 不加载 scripts / stylesheets），避开之前踩过的解析与沙箱坑。
+  // 片段里只有一个按钮，点击后调用 Zotero.MkteroBilingual.openSettings()
+  // 打开独立设置窗口——两处入口指向同一个窗口，不会有两个独立设置界面。
+  try {
+    if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.register === "function") {
+      var paneId = "mktero-prefs-" + Math.random().toString(36).slice(2, 10);
+      MkteroBilingual.prefPaneId = await Zotero.PreferencePanes.register({
+        pluginID: id,
+        id: paneId,
+        src: rootURI + "prefs.xhtml",
+        label: "双语快照 / arXiv 翻译"
+      });
+    }
+  } catch (e) {
+    // 侧栏项注册失败也不影响工具菜单入口
+    Zotero.logError(e);
+  }
 
   Zotero.getMainWindows().forEach(function (win) {
     if (win && win.document) {
