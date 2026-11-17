@@ -47,6 +47,19 @@ FORMULA_RE = formula_svg.FORMULA_RE
 EXTRA_CSS = ""
 
 
+def safe_name(s, fallback="Untitled"):
+    """把论文标题变成合法文件名。
+
+    标题里常有 / : * ? 等字符（如 "BERT: Pre-training"、"A/B Testing"），
+    直接拼路径会抛 FileNotFoundError，或把文件写进别的目录。
+    """
+    t = str(s or "").strip()
+    t = t.replace(":", "：").replace("/", "-").replace("\\", "-")
+    t = re.sub(r'[*?"<>|\x00-\x1f]', "-", t)
+    t = re.sub(r"\s+", " ", t).strip(" .-")
+    return t[:120] or fallback
+
+
 def log(*a):
     print("  ·", *a)
 
@@ -965,7 +978,7 @@ def main():
     (out_dir / "arxiv_blocks.json").write_text(
         json.dumps(out_blocks, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    final = out_dir / (a.name + ".html")
+    final = out_dir / (safe_name(a.name, "arxiv-latex-preview") + ".html")
     final.write_text(html, encoding="utf-8")
     (out_dir / "_arxiv_result.txt").write_text(str(final.resolve()), encoding="utf-8")
 

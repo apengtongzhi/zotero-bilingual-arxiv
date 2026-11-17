@@ -9,7 +9,8 @@ arxiv_translate.py — 把 arxiv_to_zotero.py 产出的结构化块翻译成中�
 
 设计：
   - 密钥只读 ~/.mktero_llm_config.json（权限 600），绝不写进脚本/日志/产物
-  - 占位符保护：system 指令 + 译后校验，丢失占位符的批次自动重试
+  - 占位符保护：system 指令 + 译后多重集校验；丢失/改写占位符的块丢弃译文并记为失败，
+    重跑（断点续传）时会自动重翻
   - 术语表：全文统一术语（Transformer/attention/encoder...），避免前后译名漂移
   - 断点续传：已翻译的块写进译文 JSON，重跑跳过；失败块单独记录
   - 每批多块，用【bNNN】标记切分，降低调用次数
@@ -132,7 +133,9 @@ def load_settings(config_path=""):
     return s, path
 
 MARK_RE = re.compile(r"【(b\d+|__title__)】")
-PH_RE = re.compile(r"⟦(?:F\d+|引用)⟧")
+# 必须覆盖 arxiv_to_zotero 产出的全部占位符：⟦F0⟧ 公式、⟦cite_1⟧ / ⟦cite_1_2⟧ 引用、
+# ⟦ref_图 2⟧ 交叉引用（另兼容早期版本的 ⟦引用⟧）。漏掉哪一类，模型丢了它都不会被发现。
+PH_RE = re.compile(r"⟦(?:F\d+|cite_[0-9_?]+|ref_[^⟧]+|引用)⟧")
 
 
 def load_config(cli):
@@ -150,6 +153,34 @@ def load_config(cli):
         else:
             sys.exit("缺少 api_key：请在设置面板配置，或用命令行参数")
     return str(base).strip().rstrip("/"), model, key, s
+
+
+def ping_llm(base, model, key, settings=None):
+    """最小连通性探测：不带翻译提示词、只要几个 token。
+
+    走 call_llm() 会把整套翻译 system prompt 发过去（几百 token、返回还是译文），
+    用来判断「能不能连上」既贵又容易看错，所以单独发一条最短请求。
+    """
+    s = settings or DEFAULT_SETTINGS
+    api = s["api"]
+    timeout = int(api.get("timeout", 120)) or 120
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 8,
+        "temperature": 0,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        chat_endpoint(base),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": "Bearer " + key,
+                 "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        d = json.loads(r.read().decode("utf-8"))
+    msg = d["choices"][0]["message"]
+    return (msg.get("content") or msg.get("reasoning_content") or ""), d.get("usage", {})
 
 
 def call_llm(base, model, key, text, attempts=3, settings=None):
@@ -245,10 +276,7 @@ def main():
 
     if a.test_llm:
         try:
-            reply, usage = call_llm(base, model, key,
-                                    "【b999】Reply with a single word: OK",
-                                    settings=settings)
-            # 只要模型有正常回复就算通过，不强求回复里带 OK
+            reply, usage = ping_llm(base, model, key, settings=settings)
             text = (reply or "").strip()
             if text:
                 print("连接成功：%s → %s（tokens=%d）"

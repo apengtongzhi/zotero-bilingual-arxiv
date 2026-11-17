@@ -112,15 +112,54 @@ a{color:#2f5fa8;text-decoration:none}
 """
 
 
+CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+
+
+def safe_name(s, fallback="Untitled"):
+    """把论文标题变成合法文件名。
+
+    标题里常有 / : * ? 等字符（如 "BERT: Pre-training"、"A/B Testing"），
+    直接拼路径会抛 FileNotFoundError，或把文件写进别的目录。
+    """
+    t = str(s or "").strip()
+    t = t.replace(":", "：").replace("/", "-").replace("\\", "-")
+    t = re.sub(r'[*?"<>|\x00-\x1f]', "-", t)
+    t = re.sub(r"\s+", " ", t).strip(" .-")
+    return t[:120] or fallback
+
+
+def text_units(s):
+    """把一块 Markdown 拆成「汉字数 / 拉丁字母数」，忽略标记符号与 URL。"""
+    t = re.sub(r"<!--[\s\S]*?-->", " ", s)
+    t = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", t)   # 图片：只留 alt
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)    # 链接：只留文字
+    t = re.sub(r"https?://\S+", " ", t)
+    return len(CJK_RE.findall(t)), len(re.findall(r"[A-Za-z]", t))
+
+
 def cjk_stats(s):
-    cjk = len(re.findall(r"[\u3400-\u9fff]", s))
+    cjk = len(CJK_RE.findall(s))
     total = len(re.sub(r"\s", "", s))
     return cjk, cjk / max(1, total)
 
 
 def is_zh(block):
-    n, ratio = cjk_stats(block)
-    return n >= 4 and ratio > 0.045
+    """判断一块是中文译文还是英文原文。
+
+    旧规则「至少 4 个汉字」会把「引言 / 摘要 / 结论 / 图 1」这类短标题判成英文，
+    于是小标题配不上对、目录为空、双语标题缺失——短块必须单独放宽。
+    """
+    cjk, latin = text_units(block)
+    if not cjk:
+        return False
+    words = latin / 4.5                      # 一个英文单词约 4.5 个字母的信息量
+    ratio = cjk / (cjk + words)
+    bare = block.strip()
+    short = (bool(re.match(r"^#{1,6}\s", bare)) or bare.startswith("![")
+             or (cjk + words) <= 8)
+    if short:
+        return ratio >= 0.5
+    return cjk >= 3 and ratio >= 0.12
 
 
 class ImgCache:
@@ -298,9 +337,62 @@ def strip_heading(html):
     return re.sub(r"^<h\d[^>]*>|</h\d>$", "", html)
 
 
+def split_heading_runs(blocks):
+    """把「多行标题挤在同一块」拆成单行块。
+
+    真实导出里英文标题和中文标题经常只隔一个换行（没有空行），
+    整块会被当成正文并排成「# EN<br># ZH」——拆开才能正常配成对照。
+    """
+    out = []
+    for b in blocks:
+        lines = [l for l in b.splitlines() if l.strip()]
+        if len(lines) > 1 and all(re.match(r"^\s{0,3}#{1,6}\s+\S", l) for l in lines):
+            out.extend(l.strip() for l in lines)
+        else:
+            out.append(b)
+    return out
+
+
+SECTION_ON = re.compile(r"^[ \t]*<!--\s*mktero-section", re.I)
+SECTION_OFF = re.compile(r"^[ \t]*<!--\s*/mktero-section", re.I)
+
+
+def isolate_section_markers(text):
+    """让 <!-- mktero-section --> 独占一块。
+
+    导出文件里收尾注释经常紧跟在上一行后面（没有空行），整块就变成
+    「作者…\n<!-- /mktero-section -->」，按块判断时永远关不掉状态，
+    后面所有多行块（表格、列表）都会被逐行拆散。
+    """
+    return re.sub(
+        r"(?m)^[ \t]*(<!--\s*/?mktero-section[^>]*-->)[ \t]*$",
+        r"\n\1\n", text,
+    )
+
+
+def expand_meta_blocks(blocks):
+    """元信息区（<!-- mktero-section -->）里一行一条，拆开才能配成对照。"""
+    out, in_meta = [], False
+    for b in blocks:
+        if SECTION_ON.match(b):
+            in_meta = True
+            out.append(b)
+            continue
+        if SECTION_OFF.match(b):
+            in_meta = False
+            out.append(b)
+            continue
+        if in_meta and "\n" in b:
+            out.extend(l.strip() for l in b.splitlines() if l.strip())
+        else:
+            out.append(b)
+    return out
+
+
 def build_body(md_path, math_on, imgs):
-    text = md_path.read_text(encoding="utf-8")
+    text = isolate_section_markers(md_path.read_text(encoding="utf-8"))
     blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+    blocks = expand_meta_blocks(split_heading_runs(blocks))
 
     out, toc, pending = [], [], None
     sec = [0]
@@ -448,6 +540,7 @@ def main():
             name = nf.read_text(encoding="utf-8").strip()
     if not name:
         name = a.name or md_path.parent.name.strip() or md_path.stem[:40].strip()
+    name = safe_name(name, "Untitled")
     md_text = md_path.read_text(encoding="utf-8")
     imgs = ImgCache(md_path.parent)
     if a.no_math:

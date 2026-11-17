@@ -1157,24 +1157,8 @@ async function runArxiv(win) {
 
     var attId = null;
     if (fileCfg.attach !== false) {
-      var att = await Zotero.Attachments.importFromFile({
-        file: html,
-        parentItemID: item.id,
-        title: name,
-        contentType: "text/html",
-        charset: "utf-8",
-        fileBaseName: name
-      });
-      att.addTag("双语");
-      att.addTag("arXiv");
-      await att.saveTx();
-      attId = att.id;
-      if (fileCfg.open_after !== false) {
-        try {
-          var zp = Zotero.getActiveZoteroPane();
-          if (typeof zp.viewAttachment === "function") zp.viewAttachment(attId);
-        } catch (e) {}
-      }
+      attId = await attachSnapshot(item, html, name, ["arXiv"]);
+      if (fileCfg.open_after !== false) openAttachment(attId);
     }
 
     // 按文件设置清理中间产物
@@ -1258,6 +1242,41 @@ function progress(text) {
   }
 }
 
+// 挂附件 + 打开：md / 文件夹 / arXiv 三个入口共用，设置里的开关对所有入口一致生效
+async function attachSnapshot(item, html, name, extraTags) {
+  var att = await Zotero.Attachments.importFromFile({
+    file: html,
+    parentItemID: item.id,
+    title: name,
+    contentType: "text/html",
+    charset: "utf-8",
+    fileBaseName: name
+  });
+  att.addTag("双语");
+  (extraTags || []).forEach(function (t) { try { att.addTag(t); } catch (e) {} });
+  await att.saveTx();
+  return att.id;
+}
+
+function openAttachment(attId) {
+  try {
+    var zp = Zotero.getActiveZoteroPane();
+    if (typeof zp.viewAttachment === "function") zp.viewAttachment(attId);
+  } catch (e) {
+    Zotero.logError(e);
+  }
+}
+
+// 「保留中间产物」关闭时清掉临时清单文件（keep_blocks 打开则全部保留）
+async function cleanupTempFiles(outDir, fileCfg, names) {
+  if (!fileCfg || fileCfg.keep_blocks) return;
+  for (var i = 0; i < names.length; i++) {
+    try {
+      await IOUtils.remove(PathUtils.join(outDir, names[i]), { ignoreAbsent: true });
+    } catch (e) {}
+  }
+}
+
 async function run(win, mode) {
   var items = [];
   try {
@@ -1328,6 +1347,11 @@ async function run(win, mode) {
 
   var name = paperName(item.getField("title"));
   var outDir = Zotero.File.pathToFile(mdPath).parent.path;
+  var settings;
+  try { settings = MkteroConfig.read(); }
+  catch (e) { settings = MkteroConfig.DEFAULT; }
+  var fileCfg = settings.files || MkteroConfig.DEFAULT.files;
+  setPref("lastDir", outDir);
   var finish = progress("正在生成双语网页快照（公式渲染约需 2-3 分钟）…");
 
   try {
@@ -1353,32 +1377,21 @@ async function run(win, mode) {
         + "\n请查看 Zotero 错误控制台。");
     }
 
-    var att = await Zotero.Attachments.importFromFile({
-      file: html,
-      parentItemID: item.id,
-      title: name,
-      contentType: "text/html",
-      charset: "utf-8",
-      fileBaseName: name
-    });
-    att.addTag("双语");
-    await att.saveTx();
-
-    try {
-      var zp = Zotero.getActiveZoteroPane();
-      if (typeof zp.viewAttachment === "function") {
-        zp.viewAttachment(att.id);
-      }
-    } catch (e) {
-      Zotero.logError(e);
+    var attId = null;
+    if (fileCfg.attach !== false) {
+      attId = await attachSnapshot(item, html, name);
+      if (fileCfg.open_after !== false) openAttachment(attId);
     }
+    await cleanupTempFiles(outDir, fileCfg, ["_mktero_result.txt", "_mktero_name.txt"]);
 
     finish(true);
     alertWin(
       win,
       "双语阅读快照",
       "已完成：\n\n" + html + "\n\n"
-      + "同名附件已挂到条目「" + item.getField("title") + "」下，双击即可阅读、高亮、做笔记。"
+      + (attId
+         ? "同名附件已挂到条目「" + item.getField("title") + "」下，双击即可阅读、高亮、做笔记。"
+         : "（按设置未自动挂到 Zotero，文件已保存在输出目录。）")
     );
   } catch (e) {
     Zotero.logError(e);

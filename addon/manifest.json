@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Bilingual Snapshot (Mktero & arXiv)",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Convert Mktero bilingual Markdown or arXiv LaTeX source into styled, self-contained bilingual HTML snapshots attached to Zotero items.",
   "author": "apengtongzhi",
   "icons": {
