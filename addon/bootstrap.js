@@ -27,24 +27,35 @@ Zotero.MkteroBilingual = {
   // ---- 设置面板逻辑（挂在全局，避免 pane 沙箱脚本） ----
   paneDoc: null,
 
-  _paneDoc: function () {
-    if (this.paneDoc && this.paneDoc.getElementById("bs-prefpane")) return this.paneDoc;
+  _paneDoc: function (ev) {
+    // 优先用事件自带的 document（最可靠，且不受窗口切换影响）
     try {
-      var enumr = Services.wm.getEnumerator(null);
-      while (enumr.hasMoreElements()) {
-        var w = enumr.getNext();
-        var d = w && (w.document || (w.content && w.content.document));
-        if (d && d.getElementById && d.getElementById("bs-prefpane")) {
+      if (ev) {
+        var d = ev.target ? ev.target.ownerDocument
+              : (ev.view && ev.view.document);
+        if (d && d.getElementById("bs-prefpane")) {
           this.paneDoc = d;
           return d;
         }
       }
     } catch (e) {}
+    if (this.paneDoc && this.paneDoc.getElementById("bs-prefpane")) return this.paneDoc;
+    try {
+      var enumr = Services.wm.getEnumerator(null);
+      while (enumr.hasMoreElements()) {
+        var w = enumr.getNext();
+        var wd = w && (w.document || (w.content && w.content.document));
+        if (wd && wd.getElementById && wd.getElementById("bs-prefpane")) {
+          this.paneDoc = wd;
+          return wd;
+        }
+      }
+    } catch (e2) {}
     return null;
   },
 
-  _set: function (id, val) {
-    var d = this._paneDoc();
+  _set: function (id, val, ev) {
+    var d = this._paneDoc(ev);
     if (!d) return;
     var el = d.getElementById(id);
     if (!el) return;
@@ -52,16 +63,16 @@ Zotero.MkteroBilingual = {
     else el.value = (val === undefined || val === null) ? "" : String(val);
   },
 
-  _get: function (id, fallback) {
-    var d = this._paneDoc();
+  _get: function (id, fallback, ev) {
+    var d = this._paneDoc(ev);
     if (!d) return fallback;
     var el = d.getElementById(id);
     if (!el) return fallback;
     return el.type === "checkbox" ? el.checked : el.value;
   },
 
-  _status: function (text, ok) {
-    var d = this._paneDoc();
+  _status: function (text, ok, ev) {
+    var d = this._paneDoc(ev);
     if (!d) return;
     ["bs-status", "bs-save-status"].forEach(function (id) {
       var el = d.getElementById(id);
@@ -78,17 +89,18 @@ Zotero.MkteroBilingual = {
     var self = this;
     if (!doc) return;
     this.paneDoc = doc;
+    var pseudoEv = { target: { ownerDocument: doc } };
     // 幂等，避免重复绑定
     if (doc.documentElement.getAttribute("data-bs-bound") === "1") {
-      this.loadPrefs();
+      this.loadPrefs(pseudoEv);
       return;
     }
     doc.documentElement.setAttribute("data-bs-bound", "1");
     var tabs = doc.querySelectorAll("[data-bs-tab]");
     for (var i = 0; i < tabs.length; i++) {
-      tabs[i].addEventListener("click", function () {
+      tabs[i].addEventListener("click", function (e) {
         var key = this.getAttribute("data-bs-tab");
-        var d = self._paneDoc();
+        var d = self._paneDoc(e);
         if (!d) return;
         var ts = d.querySelectorAll("[data-bs-tab]");
         for (var j = 0; j < ts.length; j++) {
@@ -103,7 +115,7 @@ Zotero.MkteroBilingual = {
         }
       });
     }
-    this.loadPrefs();
+    this.loadPrefs(pseudoEv);
   },
 
   onPaneLoad: function (ev) {
@@ -113,124 +125,124 @@ Zotero.MkteroBilingual = {
     } catch (e) { Zotero.logError(e); }
   },
 
-  loadPrefs: function () {
+  loadPrefs: function (ev) {
     var s;
     try { s = MkteroConfig.read(); }
-    catch (e) { this._status("读取配置失败", false); return; }
-    this._set("bs-base-url", s.api.base_url);
-    this._set("bs-model", s.api.model);
-    this._set("bs-api-key", "");            // 密钥不回显
-    this._set("bs-temperature", s.api.temperature);
-    this._set("bs-timeout", s.api.timeout);
-    this._set("bs-target-lang", s.translation.target_lang);
-    this._set("bs-batch", s.translation.batch);
-    this._set("bs-max-chars", s.translation.max_chars);
-    this._set("bs-retries", s.translation.retries);
-    this._set("bs-glossary", s.translation.glossary);
-    this._set("bs-resume", s.translation.resume);
-    this._set("bs-output-dir", s.files.output_dir);
-    this._set("bs-attach", s.files.attach);
-    this._set("bs-open-after", s.files.open_after);
-    this._set("bs-keep-source", s.files.keep_source);
-    this._set("bs-keep-cache", s.files.keep_cache);
-    this._set("bs-keep-blocks", s.files.keep_blocks);
-    this._set("bs-converter-dir", s.advanced.converter_dir);
-    this._set("bs-python", s.advanced.python);
+    catch (e) { this._status("读取配置失败", false, ev); return; }
+    this._set("bs-base-url", s.api.base_url, ev);
+    this._set("bs-model", s.api.model, ev);
+    this._set("bs-api-key", "", ev);            // 密钥不回显
+    this._set("bs-temperature", s.api.temperature, ev);
+    this._set("bs-timeout", s.api.timeout, ev);
+    this._set("bs-target-lang", s.translation.target_lang, ev);
+    this._set("bs-batch", s.translation.batch, ev);
+    this._set("bs-max-chars", s.translation.max_chars, ev);
+    this._set("bs-retries", s.translation.retries, ev);
+    this._set("bs-glossary", s.translation.glossary, ev);
+    this._set("bs-resume", s.translation.resume, ev);
+    this._set("bs-output-dir", s.files.output_dir, ev);
+    this._set("bs-attach", s.files.attach, ev);
+    this._set("bs-open-after", s.files.open_after, ev);
+    this._set("bs-keep-source", s.files.keep_source, ev);
+    this._set("bs-keep-cache", s.files.keep_cache, ev);
+    this._set("bs-keep-blocks", s.files.keep_blocks, ev);
+    this._set("bs-converter-dir", s.advanced.converter_dir, ev);
+    this._set("bs-python", s.advanced.python, ev);
   },
 
-  collectPrefs: function (existing) {
+  collectPrefs: function (existing, ev) {
     var s = existing ? JSON.parse(JSON.stringify(existing)) : MkteroConfig.read();
     var num = function (id, def, lo, hi) {
-      var v = parseFloat(Zotero.MkteroBilingual._get(id, def));
+      var v = parseFloat(Zotero.MkteroBilingual._get(id, def, ev));
       if (isNaN(v)) return def;
       if (lo !== undefined && v < lo) v = lo;
       if (hi !== undefined && v > hi) v = hi;
       return v;
     };
-    s.api.base_url = String(this._get("bs-base-url", "")).trim();
-    s.api.model = String(this._get("bs-model", "")).trim();
-    var key = String(this._get("bs-api-key", "")).trim();
+    s.api.base_url = String(this._get("bs-base-url", "", ev)).trim();
+    s.api.model = String(this._get("bs-model", "", ev)).trim();
+    var key = String(this._get("bs-api-key", "", ev)).trim();
     if (key) s.api.api_key = key;         // 留空保留旧密钥
     s.api.temperature = num("bs-temperature", 0.2, 0, 2);
     s.api.timeout = num("bs-timeout", 120, 10, 600);
-    s.translation.target_lang = String(this._get("bs-target-lang", "zh-CN"));
+    s.translation.target_lang = String(this._get("bs-target-lang", "zh-CN", ev));
     s.translation.batch = Math.round(num("bs-batch", 8, 1, 30));
     s.translation.max_chars = Math.round(num("bs-max-chars", 2600, 500, 12000));
     s.translation.retries = Math.round(num("bs-retries", 3, 1, 10));
-    s.translation.glossary = !!this._get("bs-glossary", true);
-    s.translation.resume = !!this._get("bs-resume", true);
-    s.files.output_dir = String(this._get("bs-output-dir", "")).trim();
-    s.files.attach = !!this._get("bs-attach", true);
-    s.files.open_after = !!this._get("bs-open-after", true);
-    s.files.keep_source = !!this._get("bs-keep-source", false);
-    s.files.keep_cache = !!this._get("bs-keep-cache", false);
-    s.files.keep_blocks = !!this._get("bs-keep-blocks", false);
-    s.advanced.converter_dir = String(this._get("bs-converter-dir", "")).trim();
-    s.advanced.python = String(this._get("bs-python", "")).trim();
+    s.translation.glossary = !!this._get("bs-glossary", true, ev);
+    s.translation.resume = !!this._get("bs-resume", true, ev);
+    s.files.output_dir = String(this._get("bs-output-dir", "", ev)).trim();
+    s.files.attach = !!this._get("bs-attach", true, ev);
+    s.files.open_after = !!this._get("bs-open-after", true, ev);
+    s.files.keep_source = !!this._get("bs-keep-source", false, ev);
+    s.files.keep_cache = !!this._get("bs-keep-cache", false, ev);
+    s.files.keep_blocks = !!this._get("bs-keep-blocks", false, ev);
+    s.advanced.converter_dir = String(this._get("bs-converter-dir", "", ev)).trim();
+    s.advanced.python = String(this._get("bs-python", "", ev)).trim();
     return s;
   },
 
-  savePrefs: function () {
+  savePrefs: function (ev) {
     try {
       var old = MkteroConfig.read();
-      var s = this.collectPrefs(old);
+      var s = this.collectPrefs(old, ev);
       if (!s.api.base_url || !s.api.model) {
-        this._status("Base URL 和模型不能为空", false);
+        this._status("Base URL 和模型不能为空", false, ev);
         return false;
       }
       MkteroConfig.write(s);
       // 同步转换器/python 到旧 prefs（runPython 等仍在用）
       if (s.advanced.converter_dir) setPref("converterDir", s.advanced.converter_dir);
       if (s.advanced.python) setPref("python", s.advanced.python);
-      var d = this._paneDoc();
+      var d = this._paneDoc(ev);
       if (d) { var k = d.getElementById("bs-api-key"); if (k) k.value = ""; }
-      this._status("已保存（密钥仅存本机）", true);
+      this._status("已保存（密钥仅存本机）", true, ev);
       return true;
     } catch (e) {
-      this._status("保存失败：" + (e && e.message ? e.message : e), false);
+      this._status("保存失败：" + (e && e.message ? e.message : e), false, ev);
       Zotero.logError(e);
       return false;
     }
   },
 
-  resetPrefs: function () {
+  resetPrefs: function (ev) {
     try {
       var old = MkteroConfig.read();
       var s = JSON.parse(JSON.stringify(MkteroConfig.DEFAULT));
       s.api.api_key = old.api.api_key;   // 保留密钥
-      this._set("bs-base-url", s.api.base_url);
-      this._set("bs-model", s.api.model);
-      this._set("bs-temperature", s.api.temperature);
-      this._set("bs-timeout", s.api.timeout);
-      this._set("bs-target-lang", s.translation.target_lang);
-      this._set("bs-batch", s.translation.batch);
-      this._set("bs-max-chars", s.translation.max_chars);
-      this._set("bs-retries", s.translation.retries);
-      this._set("bs-glossary", s.translation.glossary);
-      this._set("bs-resume", s.translation.resume);
-      this._set("bs-output-dir", s.files.output_dir);
-      this._set("bs-attach", s.files.attach);
-      this._set("bs-open-after", s.files.open_after);
-      this._set("bs-keep-source", s.files.keep_source);
-      this._set("bs-keep-cache", s.files.keep_cache);
-      this._set("bs-keep-blocks", s.files.keep_blocks);
-      this._set("bs-converter-dir", s.advanced.converter_dir);
-      this._set("bs-python", s.advanced.python);
-      this._status("已恢复默认，点「保存设置」生效", true);
-    } catch (e) { this._status("重置失败", false); }
+      this._set("bs-base-url", s.api.base_url, ev);
+      this._set("bs-model", s.api.model, ev);
+      this._set("bs-temperature", s.api.temperature, ev);
+      this._set("bs-timeout", s.api.timeout, ev);
+      this._set("bs-target-lang", s.translation.target_lang, ev);
+      this._set("bs-batch", s.translation.batch, ev);
+      this._set("bs-max-chars", s.translation.max_chars, ev);
+      this._set("bs-retries", s.translation.retries, ev);
+      this._set("bs-glossary", s.translation.glossary, ev);
+      this._set("bs-resume", s.translation.resume, ev);
+      this._set("bs-output-dir", s.files.output_dir, ev);
+      this._set("bs-attach", s.files.attach, ev);
+      this._set("bs-open-after", s.files.open_after, ev);
+      this._set("bs-keep-source", s.files.keep_source, ev);
+      this._set("bs-keep-cache", s.files.keep_cache, ev);
+      this._set("bs-keep-blocks", s.files.keep_blocks, ev);
+      this._set("bs-converter-dir", s.advanced.converter_dir, ev);
+      this._set("bs-python", s.advanced.python, ev);
+      this._status("已恢复默认，点「保存设置」生效", true, ev);
+    } catch (e) { this._status("重置失败", false, ev); }
   },
 
-  testLLM: function () {
+  testLLM: function (ev) {
     var self = this;
-    this._status("测试中…");
-    if (!this.savePrefs()) return;
+    this._status("测试中…", undefined, ev);
+    if (!this.savePrefs(ev)) return;
     try {
       var py = resolvePython();
-      if (!py) { self._status("找不到 python3", false); return; }
+      if (!py) { self._status("找不到 python3", false, ev); return; }
       var converter = getPref("converterDir");
       var script = converter + "/arxiv_translate.py";
       if (!Zotero.File.pathToFile(script).exists()) {
-        self._status("找不到 arxiv_translate.py，请检查转换器目录", false); return;
+        self._status("找不到 arxiv_translate.py，请检查转换器目录", false, ev); return;
       }
       var exe = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
       exe.initWithPath(py);
@@ -239,11 +251,11 @@ Zotero.MkteroBilingual = {
       var args = [script, "--test-llm", "--config", MkteroConfig.path()];
       proc.runAsync(args, args.length, {
         observe: function (subject, topic, data) {
-          if (topic === "process-finished") self._status("连接成功", true);
-          else if (topic === "process-failed") self._status("连接失败，请检查 URL / 模型 / 密钥", false);
+          if (topic === "process-finished") self._status("连接成功", true, ev);
+          else if (topic === "process-failed") self._status("连接失败，请检查 URL / 模型 / 密钥", false, ev);
         }
       });
-    } catch (e) { self._status("测试失败", false); Zotero.logError(e); }
+    } catch (e) { self._status("测试失败", false, ev); Zotero.logError(e); }
   }
 };
 
@@ -1192,17 +1204,32 @@ function promptFallbackSettings(win) {
 }
 
 function openSettings(win) {
-  var url = MkteroBilingual.rootURI + "settings.xhtml";
+  // 直接打开 Zotero 设置窗口并定位到本插件的 pane。
+  // 与设置侧栏是同一个界面，不再另开独立窗口，避免出现两个不一致的设置界面。
   try {
-    // 第 5 个参数传 null：普通 window 作用域里用 Zotero.Prefs 读取目录，
-    // 避免 nsISupports 参数在跨窗口时的兼容问题。
-    var dlg = Services.ww.openWindow(
-      win, url, "mktero-settings", "chrome,titlebar,centerscreen,resizable,dialog=yes", null
-    );
-    if (dlg) return;
+    var paneId = MkteroBilingual.prefPaneId;
+    if (paneId && Zotero.Utilities && Zotero.Utilities.Internal
+        && typeof Zotero.Utilities.Internal.openPreferences === "function") {
+      var prefWin = Zotero.Utilities.Internal.openPreferences(paneId);
+      // 片段的 onload 不一定触发，主动补一次填表（DOM 就绪后延迟执行）
+      var self = Zotero.MkteroBilingual;
+      var tries = 0;
+      var fill = function () {
+        try {
+          var doc = prefWin && prefWin.document;
+          if (doc && doc.getElementById("bs-prefpane")) {
+            self.attachDoc(doc);
+            return;
+          }
+        } catch (e) {}
+        if (tries++ < 12) win.setTimeout(fill, 250);
+      };
+      win.setTimeout(fill, 200);
+      return;
+    }
   } catch (e) {
     Zotero.logError(e);
   }
-  // 打不开窗口就退回逐项输入
+  // pane 未注册成功时退回逐项输入，保证设置仍可修改
   promptFallbackSettings(win);
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- 合并设置界面：删除独立设置窗口，工具菜单/右键的「设置」改为调用 Zotero.Utilities.Internal.openPreferences(paneID) 直接定位到设置侧栏 pane，两个入口指向同一个界面，不再出现一个能填一个空白
+- 面板逻辑改为事件驱动定位 document（_paneDoc(ev)），不再依赖可被覆盖的全局单例；打开 pane 后主动延迟补填表，兜底 onload 不触发的情况
+
 ## 0.5.0
 
 - 设置界面按 Mktero 的 UI 风格重做：Canvas 主题变量、卡片式两栏设置行、分段标签页（API 接口 / 翻译设置 / 文件与输出 / 高级），自动适配深浅色

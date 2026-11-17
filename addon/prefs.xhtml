@@ -52,7 +52,7 @@
       </html:div>
     </html:div>
     <html:div class="bs-actions">
-      <html:button type="button" class="bs-button" onclick="Zotero.MkteroBilingual.testLLM();">测试连接</html:button>
+      <html:button type="button" class="bs-button" onclick="Zotero.MkteroBilingual.testLLM(event);">测试连接</html:button>
       <html:span class="bs-status" id="bs-status"></html:span>
     </html:div>
     <html:small class="bs-note">密钥写在 ~/.mktero_llm_config.json（权限 600），不进插件包、日志或 Zotero 同步数据。</html:small>
@@ -193,8 +193,8 @@
   </html:div>
 
   <html:div class="bs-actions">
-    <html:button type="button" class="bs-button primary" onclick="Zotero.MkteroBilingual.savePrefs();">保存设置</html:button>
-    <html:button type="button" class="bs-button" onclick="Zotero.MkteroBilingual.resetPrefs();">恢复默认</html:button>
+    <html:button type="button" class="bs-button primary" onclick="Zotero.MkteroBilingual.savePrefs(event);">保存设置</html:button>
+    <html:button type="button" class="bs-button" onclick="Zotero.MkteroBilingual.resetPrefs(event);">恢复默认</html:button>
     <html:span class="bs-status" id="bs-save-status"></html:span>
   </html:div>
 </vbox>
