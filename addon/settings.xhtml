@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<dialog xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+        xmlns:html="http://www.w3.org/1999/xhtml"
+        id="mktero-settings-dialog"
+        title="双语快照 · API 与运行环境设置"
+        width="620" height="430"
+        buttons="accept,cancel"
+        buttonlabelaccept="保存并关闭"
+        buttonlabelcancel="取消"
+        ondialogaccept="return MkteroSettings.onSave();"
+        ondialogcancel="return true;"
+        onload="MkteroSettings.onLoad();">
+
+  <script type="application/javascript" src="settings.js"/>
+
+  <vbox flex="1" style="padding:14px 18px;overflow:auto">
+
+    <html:h2 style="margin:0 0 4px;font-size:1.15rem;">LLM 翻译接口（可替换任意 OpenAI 兼容服务）</html:h2>
+    <label value="密钥只写入本机 ~/.mktero_llm_config.json（权限 600），不进插件包、日志或 Zotero 同步数据。"
+           style="color:#666;font-size:.83rem;margin:0 0 12px;"/>
+
+    <hbox align="center" style="margin-bottom:6px;">
+      <label value="Base URL" control="s-base" style="width:110px;"/>
+      <html:input id="s-base" type="text" flex="1"
+                  placeholder="https://api.example.com/v1" style="flex:1;min-width:0;"/>
+    </hbox>
+    <hbox align="center" style="margin-bottom:6px;">
+      <label value="模型" control="s-model" style="width:110px;"/>
+      <html:input id="s-model" type="text" flex="1"
+                  placeholder="deepseek-v4-flash" style="flex:1;min-width:0;"/>
+    </hbox>
+    <hbox align="center" style="margin-bottom:6px;">
+      <label value="API Key" control="s-key" style="width:110px;"/>
+      <html:input id="s-key" type="password" flex="1"
+                  placeholder="留空表示沿用已保存的密钥" style="flex:1;min-width:0;"/>
+      <button label="显示" oncommand="MkteroSettings.toggleKey();"/>
+    </hbox>
+    <hbox align="center" style="margin:8px 0 16px;">
+      <button label="测试连接" oncommand="MkteroSettings.testLLM();"/>
+      <label id="s-status" value="" style="margin-left:10px;"/>
+    </hbox>
+
+    <html:h2 style="margin:0 0 4px;font-size:1.15rem;">转换器与运行环境</html:h2>
+    <hbox align="center" style="margin-bottom:6px;">
+      <label value="转换器目录" control="s-dir" style="width:110px;"/>
+      <html:input id="s-dir" type="text" flex="1" style="flex:1;min-width:0;"/>
+    </hbox>
+    <hbox align="center" style="margin-bottom:6px;">
+      <label value="python3" control="s-python" style="width:110px;"/>
+      <html:input id="s-python" type="text" flex="1" style="flex:1;min-width:0;"/>
+    </hbox>
+    <label value="留空则使用插件内置的 converter/ 目录。"
+           style="color:#666;font-size:.83rem;"/>
+
+  </vbox>
+</dialog>

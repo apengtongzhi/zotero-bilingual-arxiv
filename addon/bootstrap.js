@@ -104,7 +104,8 @@ function addMenus(win) {
     { popupID: "menu_ToolsPopup", label: "生成双语阅读快照（选 md 文件）…", command: "file" },
     { popupID: "menu_ToolsPopup", label: "生成双语阅读快照（选论文目录）…", command: "folder" },
     { popupID: "menu_ToolsPopup", label: "从 arXiv 生成双语快照…", command: "arxiv" },
-    { popupID: "menu_ToolsPopup", label: "双语快照：设置路径…", command: "settings" },
+    { popupID: "zotero-itemmenu", label: "双语快照：API 与环境设置…", command: "settings", itemMenu: true },
+    { popupID: "menu_ToolsPopup", label: "双语快照：API 与环境设置…", command: "settings" },
     { popupID: "menu_ToolsPopup", label: "双语快照：自检…", command: "check" }
   ];
 
@@ -195,11 +196,18 @@ async function startup({ id, version, rootURI }, reason) {
   // 面板脚本只操作本机 ~/.mktero_llm_config.json，不把密钥写入 Zotero prefs
   try {
     if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.register === "function") {
+      // ID 必须唯一：多个插件实例并存时固定 ID 会抛
+      // "Pane with ID ... already registered"，导致新版面板注册失败、
+      // 用户点到的永远是旧版坏面板。主设置入口已改为独立窗口，
+      // 这里只是可选的补充视图，失败不影响任何功能。
+      var paneId = "mktero-bilingual-prefs-" +
+        (id || "x").replace(/[^A-Za-z0-9]/g, "") + "-" +
+        Math.random().toString(36).slice(2, 8);
       var prefId = await Zotero.PreferencePanes.register({
         pluginID: id,
-        id: "mktero-bilingual-prefs",
+        id: paneId,
         src: rootURI + "prefs.xhtml",
-        label: "双语快照 / arXiv 翻译",
+        label: "双语快照（设置见工具菜单）",
         scripts: [rootURI + "pane.js"],
         stylesheets: [rootURI + "prefs.css"]
       });
@@ -810,19 +818,65 @@ async function selfCheck(win) {
   return lines.join("\n");
 }
 
-async function openSettings(win) {
+// 设置入口：优先打开独立 XUL 对话框（可视化、API 可替换）；
+// 窗口机制万一不可用，自动退回已验证可靠的 Services.prompt 逐项输入，
+// 保证任何环境下设置都能改，绝不会出现「点击没反应」。
+function promptFallbackSettings(win) {
   var fields = [
-    ["converterDir", "转换器目录（含 bilingual_to_zotero.py）："],
+    ["llmBase", "LLM Base URL（OpenAI 兼容）："],
+    ["llmModel", "LLM 模型名："],
+    ["llmKey", "API Key（留空表示不修改）："],
+    ["converterDir", "转换器目录（含 arxiv_to_zotero.py）："],
     ["python", "python3 可执行文件绝对路径："]
   ];
+  var llm = { base: "", model: "", key: "" };
+  // 读现有配置
+  try {
+    var home = Services.dirsvc.get("Home", Ci.nsIFile).path;
+    var cfgPath = home.replace(/\/$/, "") + "/.mktero_llm_config.json";
+    var txt = Zotero.File.getContents(cfgPath);
+    var cfg = JSON.parse(txt);
+    llm.base = cfg.base_url || "";
+    llm.model = cfg.model || "";
+  } catch (e) {}
+  var vals = {};
   for (var i = 0; i < fields.length; i++) {
     var key = fields[i][0];
-    var obj = { value: getPref(key) };
-    var ok = Services.prompt.prompt(win, "双语快照设置", fields[i][1], obj, null, { value: false });
-    if (!ok) {
-      return;
-    }
-    setPref(key, obj.value);
+    var init = (key === "llmBase" ? llm.base : key === "llmModel" ? llm.model
+      : key === "llmKey" ? "" : getPref(key));
+    var obj = { value: init };
+    var ok = Services.prompt.prompt(win, "双语快照设置 (" + (i + 1) + "/" + fields.length + ")",
+      fields[i][1], obj, null, { value: false });
+    if (!ok) return;
+    vals[key] = obj.value;
   }
+  try {
+    var home2 = Services.dirsvc.get("Home", Ci.nsIFile).path;
+    var p = home2.replace(/\/$/, "") + "/.mktero_llm_config.json";
+    var cur = {};
+    try { cur = JSON.parse(Zotero.File.getContents(p)); } catch (e) {}
+    if (vals.llmBase) cur.base_url = vals.llmBase.trim();
+    if (vals.llmModel) cur.model = vals.llmModel.trim();
+    if (vals.llmKey) cur.api_key = vals.llmKey.trim();
+    Zotero.File.putContents(p, JSON.stringify(cur, null, 2));
+  } catch (e) { Zotero.logError(e); }
+  if (vals.converterDir) setPref("converterDir", vals.converterDir.trim());
+  if (vals.python) setPref("python", vals.python.trim());
   alertWin(win, "双语快照设置", "已保存。");
+}
+
+function openSettings(win) {
+  var url = MkteroBilingual.rootURI + "settings.xhtml";
+  try {
+    // 第 5 个参数传 null：普通 window 作用域里用 Zotero.Prefs 读取目录，
+    // 避免 nsISupports 参数在跨窗口时的兼容问题。
+    var dlg = Services.ww.openWindow(
+      win, url, "mktero-settings", "chrome,titlebar,centerscreen,resizable,dialog=yes", null
+    );
+    if (dlg) return;
+  } catch (e) {
+    Zotero.logError(e);
+  }
+  // 打不开窗口就退回逐项输入
+  promptFallbackSettings(win);
 }

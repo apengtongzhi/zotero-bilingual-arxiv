@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+
+- 设置改为独立的 XUL 对话框窗口（工具/右键菜单「API 与环境设置…」），不再依赖 preference pane 片段解析与 sandbox；窗口打不开时自动退回逐项输入弹窗，保证任何环境下设置都能改
+- 修复多个插件实例并存时固定 pane ID 冲突导致新版面板注册失败的问题（pane ID 随机化，且降级为可选视图）
+
 ## 0.4.3
 
 - 修复设置面板仍为空白：片段缺少 xmlns:html 声明，Zotero 严格 XML 解析抛 unbound prefix 导致窗格加载失败
