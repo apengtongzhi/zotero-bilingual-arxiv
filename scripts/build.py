@@ -53,11 +53,24 @@ def main():
         if any(part in skip for part in rel.parts):
             continue
         files.append((p, rel.as_posix()))
+    # MathJax 的 tex-svg.js 有 2MB，Zotero 的 jar 通道读取超大条目会返回空串，
+    # 解压出来的 vendor/ 一直是空的，公式只能降级成 LaTeX 文本。
+    # 这里切成 12 个小片：每片约 175KB，jar 能稳定读出，装好后由 bootstrap 拼回。
+    TEX_PARTS = 12
+    tex = (ADDON / "converter" / "vendor" / "tex-svg.js").read_text(encoding="utf-8")
+    step = (len(tex) + TEX_PARTS - 1) // TEX_PARTS
+    shards = []
+    for i in range(TEX_PARTS):
+        chunk = tex[i * step:(i + 1) * step]
+        if chunk:
+            shards.append(("converter/vendor/tex-svg.part%02d" % i, chunk))
     with zipfile.ZipFile(xpi, "w", zipfile.ZIP_DEFLATED) as z:
         for src, rel in files:
             z.write(src, rel)
-    print("打包完成: %s (%d 个文件, %d bytes)"
-          % (xpi.name, len(files), xpi.stat().st_size))
+        for name, chunk in shards:
+            z.writestr(name, chunk)
+    print("打包完成: %s (%d 个文件 + %d 分片, %d bytes)"
+          % (xpi.name, len(files), len(shards), xpi.stat().st_size))
 
     # 生成 update.json（Zotero 自动更新）
     sha = hashlib.sha256(xpi.read_bytes()).hexdigest()

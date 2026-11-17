@@ -629,6 +629,14 @@ class RefRegistry:
 REFS = None   # 模块级引用表，由 main 初始化
 
 
+def ref_span(val):
+    """图 N 的交叉引用做成可点锚点，和 mktero 的 ref 样式保持一致。"""
+    fm = re.match(r"^图\s*(\d+)$", str(val))
+    if fm:
+        return '<a class="ref" href="#fig-%s">%s</a>' % (fm.group(1), val)
+    return '<span class="ref">%s</span>' % val
+
+
 def render_inline_tex(s):
     """把 LaTeX 行内文本转成 HTML。
 
@@ -657,8 +665,7 @@ def render_inline_tex(s):
         return hold("".join(nums)) if nums else hold('<span class="cite">[?]</span>')
     s = CITE_RE.sub(cite_repl, s)
     s = REF_RE.sub(
-        lambda m: hold('<span class="ref">%s</span>'
-                       % (REFS.ref(m.group(1)) if REFS else m.group(1))), s)
+        lambda m: hold(ref_span(REFS.ref(m.group(1)) if REFS else m.group(1))), s)
     s = re.sub(r"\\url\s*\{([^}]*)\}", lambda m: m.group(1), s)
     s = re.sub(r"\\href\s*\{[^}]*\}\s*\{([^}]*)\}", lambda m: m.group(1), s)
     # 文本样式：内容先 escape，再包标签，整体占位保护
@@ -887,8 +894,13 @@ def restore_ph(zh, formulas, fmap):
         return "".join('<a class="cite" href="#cite-%s">[%s]</a>' % (n, n) for n in nums)
     s = re.sub(r"\u27e6cite_([^\u27e7]*)\u27e7", cite_back, s)
     # ⟦ref_图 2⟧ -> 图 2
-    s = re.sub(r"\u27e6ref_([^\u27e7]*)\u27e7",
-               lambda m: '<span class="ref">%s</span>' % m.group(1), s)
+    def ref_back(m):
+        val = m.group(1)
+        fm = re.match(r"^图\s*(\d+)$", val)
+        if fm:
+            return '<a class="ref" href="#fig-%s">%s</a>' % (fm.group(1), val)
+        return '<span class="ref">%s</span>' % val
+    s = re.sub(r"\u27e6ref_([^\u27e7]*)\u27e7", ref_back, s)
     for i, f in enumerate(formulas or []):
         svg = fmap.get(f)
         if svg is None:
@@ -942,8 +954,18 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
 
     # 正文：heading 双语合并成 bi-head；其余 pair 对照
     sec_i = 0
+    fig_i = 0
     zh_n = 0
     for b, (h, plain, formulas) in zip(blocks, rendered):
+        if b["type"] == "figure":
+            fig_i += 1
+            label = '<span class="figlabel">图 %d</span> ' % fig_i
+            h = h.replace('<figure class="figure">',
+                          '<figure class="figure" id="fig-%d">' % fig_i, 1)
+            if "<figcaption" in h:
+                h = re.sub(r"(<figcaption[^>]*>)", r"\1" + label, h, count=1)
+            else:
+                h = h.replace("</figure>", "<figcaption>%s</figcaption></figure>" % label)
         zh = tr.get(b["id"], "").strip()
         if b["type"] == "heading":
             sec_i += 1
@@ -1047,6 +1069,8 @@ def main():
         % (len(REFS.cite_order), len(REFS.ref_map)))
     text = document_body(text)
     text = strip_layout(text)
+    # \( ... \) 行内公式必须先归一成 $...$，否则里面所有希腊字母/变量都会丢
+    text = formula_svg.normalize_math_delimiters(text)
     log("正文展开后 %.1f KB" % (len(text.encode("utf-8")) / 1024))
 
     blocks = parse_blocks(text)

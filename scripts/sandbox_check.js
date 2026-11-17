@@ -128,6 +128,14 @@ const zotero = {
     // 模拟 jar: 读取：直接映射到源码目录
     async getResourceAsync(url) {
       const rel = url.split("!/").pop().replace(/^\//, "");
+      // 模拟 build.py 生成的 MathJax 分片
+      const pm = rel.match(/converter\/vendor\/tex-svg\.part(\d{2})$/);
+      if (pm) {
+        const full = fs.readFileSync(
+          path.join(ADDON, "converter", "vendor", "tex-svg.js"), "utf8");
+        const step = Math.ceil(full.length / 12);
+        return full.slice(Number(pm[1]) * step, (Number(pm[1]) + 1) * step);
+      }
       const src = path.join(ADDON, rel);
       if (!fs.existsSync(src)) throw new Error("no such resource: " + url);
       return fsp.readFile(src, "utf8");
@@ -774,6 +782,13 @@ function makeMenuDoc() {
   const vendorSize = fs.existsSync(path.join(dir, "vendor/tex-svg.js"))
     ? fs.statSync(path.join(dir, "vendor/tex-svg.js")).size : 0;
   ok(vendorSize > 1000000, "大文件 tex-svg.js 完整写盘", String(vendorSize));
+  // 模拟「整块读不出来、只有分片」的场景
+  fs.rmSync(path.join(dir, "vendor", "tex-svg.js"), { force: true });
+  mb.converterDir = null;
+  const dirFromParts = await sandbox.ensureConverterDir();
+  const joined = path.join(dirFromParts, "vendor", "tex-svg.js");
+  ok(fs.existsSync(joined) && fs.statSync(joined).size > 1000000,
+     "分片能拼回完整的 MathJax", String(fs.existsSync(joined) ? fs.statSync(joined).size : 0));
 
   console.log("\n开发态：直接用源码目录");
   mb.rootURI = "file://" + ADDON + "/";

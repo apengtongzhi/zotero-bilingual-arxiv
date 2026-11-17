@@ -88,7 +88,11 @@ async function fetchText(url) {
   } catch (e) {
     Zotero.logError(e);
   }
-  return String(await Zotero.File.getContentsFromURLAsync(url));
+  try {
+    return String(await Zotero.File.getContentsFromURLAsync(url));
+  } catch (e) {
+    return "";
+  }
 }
 
 // 用户主目录。PathUtils.profileDir 各版本都有，但 homeDir 不一定——取不到时
@@ -177,6 +181,28 @@ async function ensureConverterDir() {
   );
   // 主脚本在就认为已经解压过：不再每次重试那 2MB 的 tex-svg.js
   // （它解压失败也没关系，formula_svg.py 会自己从 xpi 里读）
+  // MathJax 分片拼接：整块 2MB 从 jar 里读出来是空串，分片反而稳
+  var mathjs = PathUtils.join(target, "vendor", "tex-svg.js");
+  var hasMath = false;
+  try { hasMath = await IOUtils.exists(mathjs); } catch (e) {}
+  if (!hasMath) {
+    var shards = [];
+    for (var k = 0; k < 12; k++) {
+      var part = "";
+      try {
+        part = await fetchText(uri + "converter/vendor/tex-svg.part"
+          + (k < 10 ? "0" : "") + k);
+      } catch (e) {}
+      if (!part) break;
+      shards.push(part);
+    }
+    if (shards.length) {
+      try {
+        await IOUtils.writeUTF8(mathjs, shards.join(""));
+      } catch (e) { Zotero.logError(e); }
+    }
+  }
+
   var mainPath = PathUtils.join(target, "bilingual_to_zotero.py");
   var mainReady = false;
   try { mainReady = await IOUtils.exists(mainPath); } catch (e) {}

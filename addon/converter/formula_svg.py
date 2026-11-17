@@ -121,6 +121,20 @@ def adapt_tex(tex):
     """适配 MinerU 导出的 LaTeX 写法到 tex-svg.js 支持的命令集。"""
     return _replace_braced(tex, "\\boldsymbol", "\\pmb")
 FORMULA_RE = r"\$\$[\s\S]*?\$\$|\$[^$\n]+\$"
+
+
+def normalize_math_delimiters(text):
+    """把 LaTeX 的 \( ... \) / \[ ... \] 归一成 $ ... $ / $$ ... $$。
+
+    很多 IEEE/ACM 源码用 \(...\) 写行内公式（\alpha、\lambda、k 等），
+    而公式抽取正则只认 $...$，结果这些公式被当普通文本：符号命令被清掉，
+    希腊字母和变量就凭空消失了。必须在分块之前统一。
+    """
+    text = re.sub(r"\\\[([\s\S]*?)\\\]",
+                  lambda m: "\n\n$$" + m.group(1).strip() + "$$\n\n", text)
+    text = re.sub(r"\\\(([\s\S]*?)\\\)",
+                  lambda m: "$" + re.sub(r"\s+", " ", m.group(1)).strip() + "$", text)
+    return text
 STYLE_RE = re.compile(r"<style[^>]*>([\s\S]*?)</style>", re.I)
 
 
