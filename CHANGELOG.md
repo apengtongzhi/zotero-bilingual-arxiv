@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.6
+
+- **设置面板点开没内容**：Zotero 8 会把 preference pane 放进 `<browser>` / `<iframe>`
+  子文档，旧代码只在外层 `getElementById("bs-prefpane")`，找不到就不会调 `attachDoc`，
+  标签页点击没绑定、字段也不回填，看起来像空白。新增 `findPaneDoc()` 递归查子文档，
+  并把重试次数从 12 次（3 秒）提到 24 次（6 秒）
+- **章节标题前没有序号**：LaTeX 的 `\section` 本身不带数字，IEEEtran 编译出来的
+  `I. / A.` 层级编号要自己算。现在目录与正文都按 h2/h3/h4 层级生成
+  `1 / 2.1 / 2.2.1`，并加 `secnum` 样式
+- **参考文献里的上标下标没编译**：`$I^2$VC`、`H_\infty`、
+  `\textsuperscript{2}` 以前只是把命令删掉，留下 `$I^2$`、`H_` 这种原文。
+  现在转成 `<sup>` / `<sub>`，`\infty` 等常见符号映射成 Unicode
+- **不知道在不在跑**：ProgressWindow 在部分版本里一闪而过甚至不显示。
+  现在运行期间直接把阶段写进菜单项标签（`⏳ 下载并解析 LaTeX…` → `⏳ 排版中…` →
+  `⏳ 挂载到 Zotero…`），并把菜单项禁用防连点；翻译阶段每 3 秒读一次译文 JSON，
+  显示 `翻译中 23/79 块…`。三个入口都有，结束必定恢复标签
+
 ## 0.6.5
 
 修「arXiv 源码下载失败：curl (35) SSL_ERROR_SYSCALL in connection to export.arxiv.org:443」：

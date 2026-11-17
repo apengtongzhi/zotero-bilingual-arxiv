@@ -529,21 +529,76 @@ REF_RE = re.compile(r"\\(?:ref|eqref|autoref|cref|Cref|pageref)\s*\{([^}]*)\}")
 LABEL_RE = re.compile(r"\\label\s*\{([^}]*)\}")
 
 
+# 私有区占位符：先撑过 html.escape，最后再换成真的 <sup>/<sub>
+_SUP_O, _SUP_C = "\ue000", "\ue001"
+_SUB_O, _SUB_C = "\ue002", "\ue003"
+
+
 def clean_bbl_text(s):
-    """把 IEEEtran.bst 生成的 \\bibitem 正文清成可读的一行。"""
+    """把 IEEEtran.bst 生成的 \\bibitem 正文清成可读的一行。
+
+    参考文献里常有 $I^2$VC、H_\\infty、\\textsuperscript{1} 这类
+    上标/下标；以前只是把命令删掉，留下 "$I^2$" 这种没编译的原文。
+    """
     # 宏定义 / 排版开关整行丢掉
     s = re.sub(r"\\(?:providecommand|csname|endcsname|typeout|BIBdecl|newblock|"
                r"BIBentry\w*|BIBforeignlanguage|spaceskip|fontdimen|language|"
                r"ifx|else|fi|expandafter|relax|protect)\b[^\n]*", " ", s)
+
+    SYM = {"infty": "\u221e", "alpha": "\u03b1", "beta": "\u03b2",
+           "gamma": "\u03b3", "delta": "\u03b4", "sigma": "\u03c3",
+           "mu": "\u03bc", "lambda": "\u03bb", "pi": "\u03c0",
+           "ell": "\u2113", "times": "\u00d7", "pm": "\u00b1",
+           "leq": "\u2264", "geq": "\u2265", "approx": "\u2248",
+           "circ": "\u00b0", "dagger": "\u2020"}
+
+    def wrap(mark, val):
+        o, c = ((_SUP_O, _SUP_C) if mark == "^" else (_SUB_O, _SUB_C))
+        return o + val + c
+
+    def math_inline(m):
+        t = m.group(1)
+        # _\infty / ^\circ 这类符号命令
+        t = re.sub(r"([_^])\{\\([A-Za-z]+)\}",
+                   lambda x: wrap(x.group(1), SYM.get(x.group(2), x.group(2))), t)
+        t = re.sub(r"([_^])\\([A-Za-z]+)",
+                   lambda x: wrap(x.group(1), SYM.get(x.group(2), x.group(2))), t)
+        t = re.sub(r"\^\{([^{}]*)\}", lambda x: wrap("^", x.group(1)), t)
+        t = re.sub(r"\^([A-Za-z0-9])", lambda x: wrap("^", x.group(1)), t)
+        t = re.sub(r"_\{([^{}]*)\}", lambda x: wrap("_", x.group(1)), t)
+        t = re.sub(r"_([A-Za-z0-9])", lambda x: wrap("_", x.group(1)), t)
+        t = re.sub(r"\\[A-Za-z]+", "", t)
+        return re.sub(r"[_^]", "", t)
+
+    s = re.sub(r"\$([^$]+)\$", math_inline, s)
+    # IEEEtran 的 .bbl 里 H_\infty、I^2VC 常常不包在 $...$ 里，整段再过一遍
+    s = re.sub(r"([_^])\{\\([A-Za-z]+)\}",
+               lambda x: wrap(x.group(1), SYM.get(x.group(2), x.group(2))), s)
+    s = re.sub(r"([_^])\\([A-Za-z]+)",
+               lambda x: wrap(x.group(1), SYM.get(x.group(2), x.group(2))), s)
+    s = re.sub(r"\^\{([^{}]*)\}", lambda x: wrap("^", x.group(1)), s)
+    s = re.sub(r"\^([A-Za-z0-9])", lambda x: wrap("^", x.group(1)), s)
+    s = re.sub(r"_\{([^{}]*)\}", lambda x: wrap("_", x.group(1)), s)
+    s = re.sub(r"_([A-Za-z0-9])", lambda x: wrap("_", x.group(1)), s)
+    s = re.sub(r"\\textsuperscript\s*\{([^{}]*)\}",
+               lambda m: _SUP_O + m.group(1) + _SUP_C, s)
+    s = re.sub(r"\\textsubscript\s*\{([^{}]*)\}",
+               lambda m: _SUB_O + m.group(1) + _SUB_C, s)
     # 所有带参命令保留参数内容（\emph{...} / \bibinfo{...}{...} / \url{...} ...）
     for _ in range(5):
         s = re.sub(r"\\[A-Za-z@]+\s*\{([^{}]*)\}", r"\1", s)
     s = re.sub(r"\\[A-Za-z@]+", " ", s)
-    s = s.replace("{", "").replace("}", "").replace("~", " ").replace("\\", "")
+    s = (s.replace("{", "").replace("}", "").replace("~", " ")
+          .replace("\\", "").replace("$", ""))
+    s = re.sub(r"[_^](?![a-zA-Z0-9])", "", s)   # 清掉没配对的孤立上下标符
     s = s.replace("``", "\u201c").replace("''", "\u201d")
     s = s.replace("--", "\u2013")
     s = re.sub(r"\s+", " ", s).strip().strip(".")
-    return html_mod.escape(s)
+    s = html_mod.escape(s)
+    for a, b in ((_SUP_O, "<sup>"), (_SUP_C, "</sup>"),
+                 (_SUB_O, "<sub>"), (_SUB_C, "</sub>")):
+        s = s.replace(a, b)
+    return s
 
 
 def load_bbl(work_dir):
@@ -968,19 +1023,30 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
 
     # 先扫一遍 heading，生成目录（锚点 sec-N，与 Mktero 一致）
     # 顺序与 Mktero 保持一致：标题 → 中文标题 → 目录 → meta
+    # 章节编号：IEEEtran 编译出来是 I. / A. / 1) 这种层级编号，
+    # LaTeX 源码里 \section{} 本身不带数字，必须按层级自己算，否则标题前是空的。
     toc, sec = [], [0]
+    counters = [0, 0, 0]
     for b in blocks:
         if b["type"] == "heading":
             sec[0] += 1
-            toc.append(("sec-%d" % sec[0], b, sec[0]))
+            raw = b.get("raw")
+            lvl = int(raw[0]) if isinstance(raw, (list, tuple)) else 2
+            idx = max(0, min(2, lvl - 2))
+            counters[idx] += 1
+            for k in range(idx + 1, 3):
+                counters[k] = 0
+            num = ".".join(str(counters[k]) for k in range(idx + 1))
+            toc.append(("sec-%d" % sec[0], b, sec[0], num))
 
     if toc:
         toc_items = []
-        for sid, b, idx in toc:
+        for sid, b, idx, num in toc:
             zh = tr.get(b["id"], "").strip()
             label = zh or re.sub(r"<[^>]+>", "", str(b.get("title_plain", "")))
-            toc_items.append('<li><a href="#%s">%s</a></li>'
-                             % (sid, html_mod.escape(label or ("章节 %d" % idx))))
+            toc_items.append('<li><a href="#%s"><span class="secnum">%s</span> %s</a></li>'
+                             % (sid, html_mod.escape(num),
+                                html_mod.escape(label or ("章节 %d" % idx))))
         parts.append('<nav class="toc"><h2>目录</h2><ol>%s</ol></nav>' % "".join(toc_items))
 
     if authors:
@@ -998,6 +1064,9 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
     sec_i = 0
     fig_i = 0
     zh_n = 0
+    hcounters = [0, 0, 0]
+    secnum_style = ("display:inline-block;min-width:1.6em;margin-right:.45em;"
+                    "color:var(--muted,#888);font-size:.82em;font-weight:500")
     for b, (h, plain, formulas) in zip(blocks, rendered):
         if b["type"] == "figure":
             fig_i += 1
@@ -1016,16 +1085,22 @@ def build_html(blocks, rendered, translation, fmap, math_css, note,
             m = re.search(r"<h(\d)[^>]*>([\s\S]*?)</h\1>", h)
             lvl = m.group(1) if m else "2"
             en = re.sub(r"<[^>]+>", "", m.group(2)) if m else plain
+            hi = max(0, min(2, int(lvl) - 2))
+            hcounters[hi] += 1
+            for k in range(hi + 1, 3):
+                hcounters[k] = 0
+            num = ".".join(str(hcounters[k]) for k in range(hi + 1))
+            sn = '<span class="secnum" style="%s">%s</span> ' % (secnum_style, num)
             if zh:
                 zh_n += 1
                 parts.append(
-                    '<h%s id="%s" class="bi-head"><span class="he">%s</span>'
+                    '<h%s id="%s" class="bi-head">%s<span class="he">%s</span>'
                     '<span class="hz">%s</span></h%s>'
-                    % (lvl, sid, html_mod.escape(en), html_mod.escape(zh), lvl)
+                    % (lvl, sid, sn, html_mod.escape(en), html_mod.escape(zh), lvl)
                 )
             else:
-                parts.append('<h%s id="%s" class="bi-head">%s</h%s>'
-                             % (lvl, sid, html_mod.escape(en), lvl))
+                parts.append('<h%s id="%s" class="bi-head">%s%s</h%s>'
+                             % (lvl, sid, sn, html_mod.escape(en), lvl))
             continue
         if zh:
             zh_n += 1

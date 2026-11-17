@@ -853,6 +853,7 @@ function addMenus(win) {
     var mi = makeMenuItem(doc);
     mi.setAttribute("label", t.label);
     mi.setAttribute("data-mktero-bilingual", "1");
+    mi.setAttribute("data-bs-command", t.command);
     mi.addEventListener("command", function () {
       var task;
       if (t.command === "settings") {
@@ -1573,6 +1574,15 @@ async function runArxivAuto(win) {
 
 // 从 arXiv LaTeX 源码生成双语快照：下载→解析→翻译→排版→挂回 Zotero
 async function generateFromArxiv(win, item, arxivId) {
+  setBusy("准备中…");
+  try {
+    return await generateFromArxivInner(win, item, arxivId);
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function generateFromArxivInner(win, item, arxivId) {
   // 输出目录：设置里配了默认目录就直接用，否则每次询问
   var settings;
   try { settings = MkteroConfig.read(); }
@@ -1619,6 +1629,7 @@ async function generateFromArxiv(win, item, arxivId) {
   }
 
   var proxy = proxyUrl();
+  setBusy("下载并解析 LaTeX（" + arxivId + "）…");
   var finish = progress("正在从 arXiv「" + arxivId + "」下载并解析 LaTeX…");
   try {
     // 第一步：下载 + 解析（产出 arxiv_blocks.json 与单语预览）
@@ -1629,6 +1640,7 @@ async function generateFromArxiv(win, item, arxivId) {
     finish(true);
 
     // 第二步：翻译（调用本机私有 API 配置，约 3-5 分钟）
+    setBusy("翻译全文（0 块，约需数分钟）…");
     var finish2 = progress("正在翻译全文（约 3-5 分钟，请勿关闭 Zotero）…");
     var blocksPath = outDir + "/arxiv_blocks.json";
     var zhPath = outDir + "/_arxiv_zh.json";
@@ -1643,15 +1655,31 @@ async function generateFromArxiv(win, item, arxivId) {
       transArgs.push("--config", llmCfg);
     }
     if (proxy) transArgs.push("--proxy", proxy);
+    // 翻译期间每 3 秒读一次译文 JSON，把「已完成 N/总数」写进菜单
+    var totalBlocks = 0;
+    try {
+      var blocksRaw = await IOUtils.readUTF8(outDir + "/arxiv_blocks.json");
+      totalBlocks = (JSON.parse(blocksRaw) || []).length;
+    } catch (e) {}
+    var tick = setInterval(async function () {
+      try {
+        var doneMap = JSON.parse(await IOUtils.readUTF8(zhPath));
+        var n = Object.keys(doneMap || {}).length;
+        setBusy("翻译中 " + n + "/" + totalBlocks + " 块…（可继续用 Zotero）");
+      } catch (e) {}
+    }, 3000);
     try {
       await runScript(transArgs);
       finish2(true);
     } catch (e) {
       finish2(false);
       throw e;
+    } finally {
+      clearInterval(tick);
     }
 
     // 第三步：合成 Mktero 格式双语 HTML
+    setBusy("排版中（公式渲染约需 2-3 分钟）…");
     var finish3 = progress("正在生成双语快照（公式渲染约需 2-3 分钟）…");
     await runScript([py, parseScript, "--src", outDir + "/_arxiv_src",
                      "--out", outDir, "--name-file", nameFile,
@@ -1672,6 +1700,7 @@ async function generateFromArxiv(win, item, arxivId) {
       throw new Error("未找到生成的 HTML，输出目录：" + outDir);
     }
 
+    setBusy("挂载到 Zotero…");
     var attId = await safeAttach(win, item, html, name, ["arXiv"], fileCfg);
 
     // 按文件设置清理中间产物
@@ -1732,6 +1761,33 @@ async function findHtml(outDir) {
     }
   }
   return best;
+}
+
+// 运行期间直接把进度写到菜单项上。ProgressWindow 在部分 Zotero 版本里
+// 一闪而过甚至不显示，用户完全不知道有没有在跑；菜单项是最稳的可见位置。
+function setBusy(text) {
+  MkteroBilingual.registrations.forEach(function (r) {
+    var el = r.el;
+    if (!el) return;
+    var cmd = el.getAttribute("data-bs-command");
+    if (!cmd || cmd === "settings" || cmd === "check") return;
+    try {
+      if (text) {
+        if (!el.getAttribute("data-bs-orig")) {
+          el.setAttribute("data-bs-orig", el.getAttribute("label") || "");
+        }
+        el.setAttribute("label", "\u23f3 " + text);
+        el.setAttribute("disabled", "true");
+      } else {
+        var orig = el.getAttribute("data-bs-orig");
+        if (orig) {
+          el.setAttribute("label", orig);
+          el.removeAttribute("data-bs-orig");
+        }
+        el.removeAttribute("disabled");
+      }
+    } catch (e) {}
+  });
 }
 
 function progress(text) {
@@ -1809,6 +1865,15 @@ async function cleanupTempFiles(outDir, fileCfg, names) {
 }
 
 async function run(win, mode) {
+  setBusy("转换中…");
+  try {
+    return await runInner(win, mode);
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function runInner(win, mode) {
   var items = [];
   try {
     items = Zotero.getActiveZoteroPane().getSelectedItems() || [];
@@ -2009,6 +2074,33 @@ function promptFallbackSettings(win) {
   alertWin(win, "双语快照设置", "已保存。");
 }
 
+// Zotero 7/8 的 preference pane 可能直接插进 preferences.xhtml，
+// 也可能装在 <browser>/<iframe> 子文档里。只在外层 getElementById 会找不到，
+// 于是 attachDoc 跑不到、标签页点击没绑定，看起来就是「点开设置没内容」。
+function findPaneDoc(doc) {
+  if (!doc) return null;
+  try {
+    if (doc.getElementById("bs-prefpane")) return doc;
+  } catch (e) {}
+  var hosts = [];
+  try { hosts = doc.querySelectorAll("browser, iframe") || []; } catch (e) {}
+  for (var i = 0; i < hosts.length; i++) {
+    var inner = null;
+    try {
+      inner = hosts[i].contentDocument || hosts[i].contentWindow &&
+              hosts[i].contentWindow.document;
+    } catch (e) {}
+    if (inner) {
+      try {
+        if (inner.getElementById("bs-prefpane")) return inner;
+      } catch (e) {}
+      var deeper = findPaneDoc(inner);   // 再嵌一层也要找
+      if (deeper) return deeper;
+    }
+  }
+  return null;
+}
+
 function openSettings(win) {
   // 直接打开 Zotero 设置窗口并定位到本插件的 pane。
   // 与设置侧栏是同一个界面，不再另开独立窗口，避免出现两个不一致的设置界面。
@@ -2022,13 +2114,13 @@ function openSettings(win) {
       var tries = 0;
       var fill = function () {
         try {
-          var doc = prefWin && prefWin.document;
-          if (doc && doc.getElementById("bs-prefpane")) {
+          var doc = findPaneDoc(prefWin && prefWin.document);
+          if (doc) {
             self.attachDoc(doc);
             return;
           }
         } catch (e) {}
-        if (tries++ < 12) win.setTimeout(fill, 250);
+        if (tries++ < 24) win.setTimeout(fill, 250);
       };
       win.setTimeout(fill, 200);
       return;

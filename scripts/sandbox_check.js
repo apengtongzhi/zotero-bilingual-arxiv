@@ -763,9 +763,31 @@ function makeMenuDoc() {
     ok(/Pokhrel/.test(r.bbl_first) && /2022/.test(r.bbl_first),
        "文献条目有作者与年份，不再是 bibtex key", r.bbl_first);
     ok(!/\\emph|\\bibitem/.test(r.bbl_first), "LaTeX 命令已清掉");
+    eq(/<sup>2<\/sup>/.test(r.sup), true, "$I^2$ 编译成上标", r.sup);
+    eq(/<sub>\u221e<\/sub>/.test(r.sub), true, "H_\\infty 编译成下标", r.sub);
+    eq(/<sup>2<\/sup>/.test(r.textsup), true, "\\textsuperscript 编译成上标", r.textsup);
   } else {
     ok(false, "python 探针可运行", String(probe.stderr || "").slice(0, 200));
   }
+
+  console.log("\n设置面板与进度提示");
+  const innerDoc = { getElementById: (id) => id === "bs-prefpane" ? { id } : null };
+  const outerDoc = {
+    getElementById: () => null,
+    querySelectorAll: () => [{ contentDocument: innerDoc }]
+  };
+  eq(sandbox.findPaneDoc(outerDoc), innerDoc, "pane 在 iframe/browser 里也能定位到");
+  eq(sandbox.findPaneDoc({ getElementById: () => null, querySelectorAll: () => [] }),
+     null, "找不到 pane 时返回 null 而不是崩");
+  const busyDoc = makeMenuDoc();
+  sandbox.addMenus({ document: busyDoc });
+  sandbox.setBusy("翻译中 3/79 块");
+  const menuEls = () => busyDoc.querySelectorAll("[data-mktero-bilingual]");
+  ok(menuEls().some((el) => /翻译中/.test(el.getAttribute("label") || "")),
+     "运行时菜单项显示当前阶段");
+  sandbox.setBusy(null);
+  ok(menuEls().every((el) => !/⏳|翻译中/.test(el.getAttribute("label") || "")),
+     "结束后菜单标签恢复");
 
   console.log("\njar 安装态：转换器解压");
   const mb = sandbox.MkteroBilingual;

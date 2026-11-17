@@ -42,6 +42,9 @@ order, entries = a.load_bbl(bbl_dir)
 shutil.rmtree(bbl_dir, ignore_errors=True)
 
 print(json.dumps({
+    "sup": a.clean_bbl_text(r"M. Liu, ``$I^2$VC,'' 2024."),
+    "sub": a.clean_bbl_text(r"X. Li, ``H_\infty control,'' 2020."),
+    "textsup": a.clean_bbl_text(r"A. B, ``Fast method\\textsuperscript{2},'' 2021."),
     "clean": ("A Paper" not in body and "J. Doe" not in body
               and "IEEEtran" not in body and "reference" not in body
               and "thanks" not in body and "email x" not in body),
