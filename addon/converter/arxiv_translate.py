@@ -29,43 +29,104 @@ from pathlib import Path
 
 CONFIG = Path.home() / ".mktero_llm_config.json"
 
-SYSTEM_PROMPT = """你是学术论文翻译助手，把给定英文逐条翻译成简体中文。严格规则：
-1. 逐条翻译，每条输出格式必须是【bNNN】译文，bNNN 与输入标记完全一致，一条一行，不要遗漏、不要合并、不要加编号列表或额外说明。
-2. 文本中的 ⟦F0⟧ ⟦F1⟧ ⟦引用⟧ 是占位符，必须原样逐字保留在译文对应位置，不得翻译、删除、改写或移动顺序。
-3. 只翻译自然语言正文；不要解释，不要添加原文没有的内容。
-4. 术语统一：Transformer=Transformer，attention=注意力，encoder=编码器，decoder=解码器，self-attention=自注意力，layer=层，token=词元，embedding=嵌入，softmax=softmax，dropout=dropout，state-of-the-art=最先进，ablation=消融实验。
-5. 译文忠实、通顺、学术化，保留原文的语气与信息密度。"""
+LANG_NAMES = {
+    "zh-CN": "简体中文", "zh-TW": "繁体中文",
+    "en": "英文", "ja": "日文", "ko": "韩文", "de": "德文", "fr": "法文",
+}
 
 GLOSSARY_HINT = (
     "术语参考：Transformer / 注意力(attention) / 编码器(encoder) / 解码器(decoder) / "
     "自注意力(self-attention) / 词元(token) / 嵌入(embedding) 保持上述译法。"
 )
 
+
+def system_prompt(lang="zh-CN", glossary=True):
+    target = LANG_NAMES.get(lang, lang)
+    rules = [
+        "你是学术论文翻译助手，把给定英文逐条翻译成%s。严格规则：" % target,
+        "1. 逐条翻译，每条输出格式必须是【bNNN】译文，bNNN 与输入标记完全一致，一条一行，不要遗漏、不要合并、不要加编号列表或额外说明。",
+        "2. 文本中的 ⟦F0⟧ ⟦F1⟧ ⟦cite_N⟧ ⟦ref_X⟧ 是占位符，必须原样逐字保留在译文对应位置，不得翻译、删除、改写。允许按%s语序调整位置。" % target,
+        "3. 只翻译自然语言正文；不要解释，不要添加原文没有的内容。",
+    ]
+    if glossary:
+        rules.append("4. 术语统一：Transformer=Transformer，attention=注意力，encoder=编码器，"
+                     "decoder=解码器，self-attention=自注意力，layer=层，token=词元，"
+                     "embedding=嵌入，softmax=softmax，dropout=dropout，"
+                     "state-of-the-art=最先进，ablation=消融实验。")
+    rules.append("5. 译文忠实、通顺、学术化，保留原文的语气与信息密度。")
+    return "\n".join(rules)
+
+
+# 默认设置（配置文件缺字段时用）
+DEFAULT_SETTINGS = {
+    "api": {"base_url": "", "model": "", "api_key": "",
+            "temperature": 0.2, "timeout": 120},
+    "translation": {"target_lang": "zh-CN", "batch": 8, "max_chars": 2600,
+                     "glossary": True, "retries": 3, "resume": True},
+    "files": {"output_dir": "", "keep_source": False, "keep_cache": False,
+              "keep_blocks": False, "attach": True, "open_after": True},
+    "advanced": {"converter_dir": "", "python": ""},
+}
+
+
+def deep_merge(base, override):
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_settings(config_path=""):
+    """读配置：兼容旧版扁平格式与新版四段格式。返回 (settings, path)。"""
+    path = Path(config_path).expanduser().resolve() if config_path else CONFIG
+    raw = {}
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            raw = {}
+    s = deep_merge(DEFAULT_SETTINGS, raw)
+    # 旧版扁平字段提升到 api 段
+    if not s["api"]["base_url"] and raw.get("base_url"):
+        s["api"]["base_url"] = raw["base_url"]
+    if not s["api"]["model"] and raw.get("model"):
+        s["api"]["model"] = raw["model"]
+    if not s["api"]["api_key"] and raw.get("api_key"):
+        s["api"]["api_key"] = raw["api_key"]
+    return s, path
+
 MARK_RE = re.compile(r"【(b\d+|__title__)】")
 PH_RE = re.compile(r"⟦(?:F\d+|引用)⟧")
 
 
 def load_config(cli):
-    cfg = {}
-    cfg_path = Path(cli.config).expanduser().resolve() if cli.config else CONFIG
-    if cfg_path.exists():
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    base = cli.base_url or cfg.get("base_url", "")
-    model = cli.model or cfg.get("model", "")
-    key = cli.api_key or cfg.get("api_key", "")
+    """返回 (base, model, key, settings)。CLI 参数优先于配置文件。"""
+    s, cfg_path = load_settings(cli.config)
+    api = s["api"]
+    base = cli.base_url or api["base_url"]
+    model = cli.model or api["model"]
+    key = cli.api_key or api["api_key"]
     if not (base and model and key):
-        sys.exit("缺少 base_url / model / api_key：请建 %s（权限 600）或用命令行参数" % cfg_path)
-    return base.rstrip("/"), model, key
+        sys.exit("缺少 base_url / model / api_key：请在设置面板配置，或用命令行参数")
+    return base.rstrip("/"), model, key, s
 
 
-def call_llm(base, model, key, text, attempts=3):
+def call_llm(base, model, key, text, attempts=3, settings=None):
+    s = settings or DEFAULT_SETTINGS
+    api, tr = s["api"], s["translation"]
+    prompt = system_prompt(tr.get("target_lang", "zh-CN"),
+                           tr.get("glossary", True))
+    hint = (GLOSSARY_HINT + "\n\n") if tr.get("glossary", True) else ""
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": GLOSSARY_HINT + "\n\n请翻译：\n" + text},
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": hint + "请翻译：\n" + text},
         ],
-        "temperature": 0.2,
+        "temperature": float(api.get("temperature", 0.2)),
         "stream": False,
     }
     req = urllib.request.Request(
@@ -74,10 +135,12 @@ def call_llm(base, model, key, text, attempts=3):
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json"},
     )
+    attempts = int(tr.get("retries", attempts)) or 1
+    timeout = int(api.get("timeout", 120)) or 120
     last = None
     for i in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 d = json.loads(r.read().decode("utf-8"))
             return d["choices"][0]["message"]["content"], d.get("usage", {})
         except urllib.error.HTTPError as e:
@@ -135,12 +198,18 @@ def main():
     ap.add_argument("--api-key", default="")
     a = ap.parse_args()
 
-    base, model, key = load_config(a)
+    base, model, key, settings = load_config(a)
+    tr = settings["translation"]
+    # CLI 显式传入时覆盖配置；否则用配置值
+    batch_size = a.batch if a.batch != 8 else int(tr.get("batch", 8))
+    max_chars = a.max_chars if a.max_chars != 2600 else int(tr.get("max_chars", 2600))
+    resume = bool(tr.get("resume", True))
 
     if a.test_llm:
         try:
             reply, usage = call_llm(base, model, key,
-                                    "【b999】Reply with a single word: OK")
+                                    "【b999】Reply with a single word: OK",
+                                    settings=settings)
             if "OK" in reply.upper():
                 print("连接成功：模型 %s 返回正常（tokens=%d）"
                       % (model, usage.get("total_tokens", 0)))
@@ -161,7 +230,7 @@ def main():
     out = Path(a.out).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     done = {}
-    if out.exists():
+    if out.exists() and resume:
         try:
             done = json.loads(out.read_text(encoding="utf-8"))
         except Exception:
@@ -190,6 +259,7 @@ def main():
             reply, usage = call_llm(
                 base, model, key,
                 "【__title__】" + a.title,
+                settings=settings,
             )
             used_tokens += usage.get("total_tokens", 0)
             got = parse_translation(reply, {"__title__": {"text": a.title}})
@@ -203,10 +273,10 @@ def main():
     while i < len(todo):
         # 组装一批：按块数和字符上限双重约束
         batch, size = [], 0
-        while i < len(todo) and len(batch) < a.batch:
+        while i < len(todo) and len(batch) < batch_size:
             b = todo[i]
             line = "【%s】%s" % (b["id"], b["text"].strip())
-            if batch and size + len(line) > a.max_chars:
+            if batch and size + len(line) > max_chars:
                 break
             batch.append((b, line))
             size += len(line)
@@ -216,7 +286,8 @@ def main():
         print("\n[%d/%d] 批次 %d 块，%d 字符" % (i, len(todo), len(batch), size), flush=True)
 
         try:
-            reply, usage = call_llm(base, model, key, payload_text)
+            reply, usage = call_llm(base, model, key, payload_text,
+                                    settings=settings)
             used_tokens += usage.get("total_tokens", 0)
             got = parse_translation(reply, expected)
         except Exception as e:

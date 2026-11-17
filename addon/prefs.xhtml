@@ -1,18 +1,200 @@
-<vbox id="mktero-prefpane" style="padding:10px 16px">
-  <groupbox>
-    <label value="双语快照 / arXiv 翻译" style="font-weight:600;font-size:1.05rem;"/>
-    <description style="margin:8px 0;">
-      把 Mktero 双语 Markdown 或 arXiv LaTeX 源码转成自包含双语 HTML 快照，挂回 Zotero 条目。
-    </description>
-    <description style="margin:0 0 10px;">
-      LLM API、转换器目录、python 路径等设置在独立窗口中配置。点击下方按钮打开。
-    </description>
-    <hbox>
-      <button id="mktero-pane-open-settings" label="打开 API 与环境设置…"
-              oncommand="Zotero.MkteroBilingual.openSettings();"/>
-      <button id="mktero-pane-selftest" label="自检…"
-              oncommand="Zotero.MkteroBilingual.selfCheck();"/>
-    </hbox>
-    <label value="若上方按钮无反应：工具 → 「双语快照：API 与环境设置…」，或右键文献条目 → 同名菜单项。" style="color:#666;font-size:.85rem;margin-top:10px;"/>
-  </groupbox>
+<vbox id="bs-prefpane" class="main-section"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      onload="Zotero.MkteroBilingual.onPaneLoad(event);">
+
+  <html:div class="bs-tablist" role="tablist">
+    <html:button type="button" class="bs-tab" role="tab" aria-selected="true"
+                  data-bs-tab="api">API 接口</html:button>
+    <html:button type="button" class="bs-tab" role="tab" aria-selected="false"
+                  data-bs-tab="translation">翻译设置</html:button>
+    <html:button type="button" class="bs-tab" role="tab" aria-selected="false"
+                  data-bs-tab="files">文件与输出</html:button>
+    <html:button type="button" class="bs-tab" role="tab" aria-selected="false"
+                  data-bs-tab="advanced">高级</html:button>
+  </html:div>
+
+  <html:div class="bs-section" data-bs-section="api">
+    <html:div class="bs-card">
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>Base URL</html:strong>
+          <html:small>任意 OpenAI 兼容服务的 /v1 地址</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-base-url" type="text"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>模型</html:strong>
+          <html:small>如 deepseek-v4-flash、gpt-4o、qwen-plus</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-model" type="text"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>API Key</html:strong>
+          <html:small>仅存本机，留空表示不修改（不会回显）</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-api-key" type="password"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>温度 (temperature)</html:strong>
+          <html:small>越低越忠实，建议 0.1 – 0.3</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-temperature" type="number" min="0" max="2" step="0.1"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>请求超时（秒）</html:strong>
+          <html:small>单次 LLM 调用最长等待时间</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-timeout" type="number" min="10" max="600" step="10"/></html:div>
+      </html:div>
+    </html:div>
+    <html:div class="bs-actions">
+      <html:button type="button" class="bs-button" onclick="Zotero.MkteroBilingual.testLLM();">测试连接</html:button>
+      <html:span class="bs-status" id="bs-status"></html:span>
+    </html:div>
+    <html:small class="bs-note">密钥写在 ~/.mktero_llm_config.json（权限 600），不进插件包、日志或 Zotero 同步数据。</html:small>
+  </html:div>
+
+  <html:div class="bs-section" data-bs-section="translation" hidden="hidden">
+    <html:div class="bs-card">
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>目标语言</html:strong>
+          <html:small>译文语言，影响提示词与术语</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:select id="bs-target-lang">
+          <html:option value="zh-CN">简体中文</html:option>
+          <html:option value="zh-TW">繁体中文</html:option>
+          <html:option value="en">英文</html:option>
+          <html:option value="ja">日文</html:option>
+          <html:option value="ko">韩文</html:option>
+        </html:select></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>每批块数</html:strong>
+          <html:small>一次请求合并几个段落，越大越省调用</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-batch" type="number" min="1" max="30" step="1"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>每批字符上限</html:strong>
+          <html:small>防止超出模型上下文，默认 2600</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-max-chars" type="number" min="500" max="12000" step="100"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>失败重试次数</html:strong>
+          <html:small>限流或网关错误时的重试上限</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-retries" type="number" min="1" max="10" step="1"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>术语统一</html:strong>
+          <html:small>强制 Transformer / 注意力 / 编码器 等译名一致</html:small>
+        </html:div>
+        <html:div class="bs-control bs-check">
+          <html:input id="bs-glossary" type="checkbox"/><html:label for="bs-glossary">启用</html:label>
+        </html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>断点续传</html:strong>
+          <html:small>重跑时跳过已翻译的段落</html:small>
+        </html:div>
+        <html:div class="bs-control bs-check">
+          <html:input id="bs-resume" type="checkbox"/><html:label for="bs-resume">启用</html:label>
+        </html:div>
+      </html:div>
+    </html:div>
+  </html:div>
+
+  <html:div class="bs-section" data-bs-section="files" hidden="hidden">
+    <html:div class="bs-card">
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>默认输出目录</html:strong>
+          <html:small>留空则每次运行时询问；源码、译文、HTML 都放这里</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-output-dir" type="text"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>自动挂到 Zotero 条目</html:strong>
+          <html:small>生成后作为 HTML 附件挂到选中文献下</html:small>
+        </html:div>
+        <html:div class="bs-control bs-check">
+          <html:input id="bs-attach" type="checkbox"/><html:label for="bs-attach">启用</html:label>
+        </html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>生成后自动打开预览</html:strong>
+          <html:small>挂完附件立即在 Zotero 阅读器打开</html:small>
+        </html:div>
+        <html:div class="bs-control bs-check">
+          <html:input id="bs-open-after" type="checkbox"/><html:label for="bs-open-after">启用</html:label>
+        </html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>保留 LaTeX 源码</html:strong>
+          <html:small>否则运行成功后删除解压出的源码目录</html:small>
+        </html:div>
+        <html:div class="bs-control bs-check">
+          <html:input id="bs-keep-source" type="checkbox"/><html:label for="bs-keep-source">保留</html:label>
+        </html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>保留下载缓存</html:strong>
+          <html:small>保留 e-print 压缩包，下次同 ID 可跳过下载</html:small>
+        </html:div>
+        <html:div class="bs-control bs-check">
+          <html:input id="bs-keep-cache" type="checkbox"/><html:label for="bs-keep-cache">保留</html:label>
+        </html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>保留中间产物</html:strong>
+          <html:small>blocks JSON、译文 JSON、文件名/结果清单；调试时有用</html:small>
+        </html:div>
+        <html:div class="bs-control bs-check">
+          <html:input id="bs-keep-blocks" type="checkbox"/><html:label for="bs-keep-blocks">保留</html:label>
+        </html:div>
+      </html:div>
+    </html:div>
+  </html:div>
+
+  <html:div class="bs-section" data-bs-section="advanced" hidden="hidden">
+    <html:div class="bs-card">
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>转换器目录</html:strong>
+          <html:small>留空使用插件内置转换器（一般无需修改）</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-converter-dir" type="text"/></html:div>
+      </html:div>
+      <html:div class="bs-row">
+        <html:div class="bs-copy">
+          <html:strong>python3 路径</html:strong>
+          <html:small>留空自动检测 /usr/bin/python3 等</html:small>
+        </html:div>
+        <html:div class="bs-control"><html:input id="bs-python" type="text"/></html:div>
+      </html:div>
+    </html:div>
+    <html:small class="bs-note">三种入口（选 md 文件 / 选论文目录 / arXiv LaTeX）共用以上设置与同一套排版。</html:small>
+  </html:div>
+
+  <html:div class="bs-actions">
+    <html:button type="button" class="bs-button primary" onclick="Zotero.MkteroBilingual.savePrefs();">保存设置</html:button>
+    <html:button type="button" class="bs-button" onclick="Zotero.MkteroBilingual.resetPrefs();">恢复默认</html:button>
+    <html:span class="bs-status" id="bs-save-status"></html:span>
+  </html:div>
 </vbox>
